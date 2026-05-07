@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 from sqlalchemy import Engine, text
 
-from extract import get_dmp_engine
+from config import get_dmp_engine
 from transform import clean_text_columns
 
 

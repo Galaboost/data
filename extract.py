@@ -1,44 +1,9 @@
 from __future__ import annotations
 
-import os
-
 import pandas as pd
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, text
 
-
-def build_engine(
-    *,
-    dialect: str,
-    user: str,
-    password: str,
-    database: str,
-    host: str,
-    port: int | None,
-) -> Engine:
-    port_part = f":{port}" if port is not None else ""
-    return create_engine(f"{dialect}://{user}:{password}@{host}{port_part}/{database}")
-
-
-def get_symaro_engine() -> Engine:
-    return build_engine(
-        dialect=os.environ.get("SYMARO_DIALECT", "mysql+pymysql"),
-        user=os.environ.get("SYMARO_USER", "appdatamart"),
-        password=os.environ.get("SYMARO_PASSWORD", "appdatamart01"),
-        database=os.environ.get("SYMARO_DATABASE", "symaro"),
-        host=os.environ.get("SYMARO_HOST", "symarodb"),
-        port=int(os.environ.get("SYMARO_PORT", "3306")),
-    )
-
-
-def get_dmp_engine() -> Engine:
-    return build_engine(
-        dialect=os.environ.get("DMP_DIALECT", "mariadb+mariadbconnector"),
-        user=os.environ.get("DMP_USER", "appdatamart"),
-        password=os.environ.get("DMP_PASSWORD", "appdatamart1"),
-        database=os.environ.get("DMP_DATABASE", "dmp"),
-        host=os.environ.get("DMP_HOST", "maxscale"),
-        port=int(os.environ.get("DMP_PORT", "4306")),
-    )
+from config import get_dmp_engine, get_symaro_engine
 
 
 def read_sql_df(engine: Engine, query: str) -> pd.DataFrame:

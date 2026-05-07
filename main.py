@@ -5,11 +5,10 @@ import logging
 
 import pandas as pd
 
+from config import get_dmp_engine, get_symaro_engine
 from extract import (
     extract_datamart_reference,
     extract_symaro_data,
-    get_dmp_engine,
-    get_symaro_engine,
 )
 from load import load_created_reference, load_updated_reference
 from transform import build_reference_delta, build_symaro_reference
