@@ -107,3 +107,4 @@ def extract_datamart_reference(dmp_engine: Engine | None = None) -> pd.DataFrame
     engine = dmp_engine or get_dmp_engine()
     df = read_sql_df(engine, "SELECT * FROM t_mes_ref_oper")
     return df.drop(columns=["mes_ref_oper_id"], errors="ignore").drop_duplicates().copy()
+
