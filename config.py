@@ -1,72 +1,32 @@
-from __future__ import annotations
-
 import os
-from pathlib import Path
 
-from sqlalchemy import Engine, create_engine
-
-
-BASE_DIR = Path(__file__).resolve().parent
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 
 
-def load_env_file(path: Path | None = None) -> None:
-    env_path = path or BASE_DIR / ".env"
-    if not env_path.exists():
-        return
+load_dotenv()
 
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
+def connect_to_symaro_db():
+    user = os.environ["SYMARO_USER"]
+    password = os.environ["SYMARO_PASSWORD"]
+    host = os.environ.get("SYMARO_HOST", "localhost")
+    port = os.environ.get("SYMARO_PORT", "3306")
+    database = os.environ.get("SYMARO_DATABASE", "symaro")
 
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
-
-
-def getenv_int(name: str, default: int) -> int:
-    return int(os.environ.get(name, str(default)))
-
-
-def get_symaro_config() -> dict[str, object]:
-    load_env_file()
-    return {
-        "dialect": os.environ.get("SYMARO_DIALECT", "mysql+pymysql"),
-        "user": os.environ.get("SYMARO_USER", "appdatamart"),
-        "password": os.environ.get("SYMARO_PASSWORD", "appdatamart01"),
-        "database": os.environ.get("SYMARO_DATABASE", "symaro"),
-        "host": os.environ.get("SYMARO_HOST", "symarodb"),
-        "port": getenv_int("SYMARO_PORT", 3306),
-    }
-
-
-def get_dmp_config() -> dict[str, object]:
-    load_env_file()
-    return {
-        "dialect": os.environ.get("DMP_DIALECT", "mariadb+mariadbconnector"),
-        "user": os.environ.get("DMP_USER", "appdatamart"),
-        "password": os.environ.get("DMP_PASSWORD", "appdatamart1"),
-        "database": os.environ.get("DMP_DATABASE", "dmp"),
-        "host": os.environ.get("DMP_HOST", "maxscale"),
-        "port": getenv_int("DMP_PORT", 4306),
-    }
-
-
-def build_database_url(config: dict[str, object]) -> str:
-    return (
-        f"{config['dialect']}://{config['user']}:{config['password']}"
-        f"@{config['host']}:{config['port']}/{config['database']}"
+    return create_engine(
+        f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}",
+        pool_pre_ping=True
     )
 
 
-def build_engine(config: dict[str, object]) -> Engine:
-    return create_engine(build_database_url(config))
+def connect_to_datamart_db():
+    user = os.environ.get("DATAMART_USER", "appdatamart")
+    password = os.environ["DATAMART_PASSWORD"]
+    host = os.environ.get("DATAMART_HOST", "maxscale")
+    port = os.environ.get("DATAMART_PORT", "4306")
+    database = os.environ.get("DATAMART_DATABASE", "dmp")
 
-
-def get_symaro_engine() -> Engine:
-    return build_engine(get_symaro_config())
-
-
-def get_dmp_engine() -> Engine:
-    return build_engine(get_dmp_config())
+    return create_engine(
+        f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}",
+        pool_pre_ping=True
+    )

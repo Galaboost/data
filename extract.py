@@ -1,110 +1,81 @@
-from __future__ import annotations
-
 import pandas as pd
-from sqlalchemy import Engine, text
-
-from config import get_dmp_engine, get_symaro_engine
+import logging
 
 
-def read_sql_df(engine: Engine, query: str) -> pd.DataFrame:
-    with engine.connect() as connection:
-        return pd.read_sql(text(query), connection)
+logger = logging.getLogger(__name__)
 
 
-def latest_rows(df: pd.DataFrame, key_columns: list[str], time_column: str) -> pd.DataFrame:
-    df = df.drop_duplicates().copy()
-    df[time_column] = pd.to_datetime(df[time_column], errors="coerce")
-    latest_time = df.groupby(key_columns, dropna=False)[time_column].transform("max")
-    return df.loc[df[time_column].eq(latest_time)].drop_duplicates().copy()
+SYMARO_QUERIES = {
+    "oper": """
+        SELECT OPE_ID, OPE_NAME, OPE_COMMENT, OPE_UPD_TIME
+        FROM T_OPERATION
+    """,
+    "rattachement": """
+        SELECT RAT_ID, RAT_OPE_ID, RAT_PRODUCT_CODE, RAT_CODETECHNO, RAT_ROUTE_ID, RAT_UPD_TIME
+        FROM T_RATTACHEMENT
+    """,
+    "destination": """
+        SELECT DEST_ROUTE_ID, DEST_RAT_ID, DEST_ROUTE_DESCRIPTION
+        FROM T_DESTINATION
+    """,
+    "route": """
+        SELECT RTE_ID, RTE_NAME, RTE_UPD_TIME
+        FROM T_ROUTE
+    """,
+}
 
 
-def latest_proccard_rows(df: pd.DataFrame) -> pd.DataFrame:
-    df = latest_rows(df, ["PCA_NAME"], "PCA_UPD_TIME")
-    latest_id = df.groupby("PCA_NAME", dropna=False)["PCA_ID"].transform("max")
-    return df.loc[df["PCA_ID"].eq(latest_id)].drop_duplicates().copy()
+DATAMART_QUERIES = {
+    "device_cp": """
+        SELECT DISTINCT substr(l.mes_lot_id, 1, 2) as product_code, d.device_id
+        FROM t_lot l
+        JOIN t_device d ON l.device_id = d.device_id
+    """,
+    "from_datamart_cp": """
+        SELECT *
+        FROM t_mes_ref_cp
+    """,
+    "from_datamart_route": """
+        SELECT *
+        FROM t_mes_ref_route
+    """,
+    "from_datamart_oper": """
+        SELECT operation, route
+        FROM t_mes_ref_oper
+    """,
+    "device": """
+        SELECT device_id, local_process_family
+        FROM t_device
+    """,
+}
 
 
-def extract_symaro_data(symaro_engine: Engine | None = None) -> dict[str, pd.DataFrame]:
-    engine = symaro_engine or get_symaro_engine()
-
-    proccard = latest_proccard_rows(
-        read_sql_df(
-            engine,
-            """
-            SELECT PCA_ID, PCA_NAME, PCA_COMMENT, PCA_GATE_ID, PCA_GATE_COMMENT, PCA_UPD_TIME
-            FROM T_PCARD
-            """,
-        )
-    )
-
-    proccardoper = latest_rows(
-        read_sql_df(
-            engine,
-            """
-            SELECT PCO_PCARD_ID, PCO_OPERATION_ID, PCO_SEQUENCE, PCO_UPD_TIME
-            FROM TL_PCARD_OPER
-            """,
-        ),
-        ["PCO_PCARD_ID", "PCO_OPERATION_ID"],
-        "PCO_UPD_TIME",
-    )
-
-    oper = latest_rows(
-        read_sql_df(
-            engine,
-            """
-            SELECT OPE_ID, OPE_NAME, OPE_COMMENT, OPE_UPD_TIME
-            FROM T_OPERATION
-            """,
-        ),
-        ["OPE_NAME"],
-        "OPE_UPD_TIME",
-    )
-
-    routepcard = read_sql_df(
-        engine,
-        """
-        SELECT RTE_PCARD_ID, RTE_ROUTE_ID
-        FROM TL_ROUTE_PCARDS
-        """,
-    ).drop_duplicates()
-
-    route = latest_rows(
-        read_sql_df(
-            engine,
-            """
-            SELECT RTE_ID, RTE_NAME, RTE_UPD_TIME
-            FROM T_ROUTE
-            """,
-        ),
-        ["RTE_NAME"],
-        "RTE_UPD_TIME",
-    )
-
-    gate = latest_rows(
-        read_sql_df(
-            engine,
-            """
-            SELECT GATE_ID, GATE_NAME, GATE_UPD_TIME
-            FROM T_GATE
-            """,
-        ),
-        ["GATE_NAME"],
-        "GATE_UPD_TIME",
-    )
-
-    return {
-        "proccard": proccard,
-        "proccardoper": proccardoper,
-        "oper": oper,
-        "routepcard": routepcard,
-        "route": route,
-        "gate": gate,
-    }
+def read_query(engine, query, label):
+    logger.info("Loading %s", label)
+    df = pd.read_sql(query, engine)
+    df = df.drop_duplicates()
+    logger.info("RETURNCODE=0")
+    logger.info("Data acquisition %s OK", label)
+    return df
 
 
-def extract_datamart_reference(dmp_engine: Engine | None = None) -> pd.DataFrame:
-    engine = dmp_engine or get_dmp_engine()
-    df = read_sql_df(engine, "SELECT * FROM t_mes_ref_oper")
-    return df.drop(columns=["mes_ref_oper_id"], errors="ignore").drop_duplicates().copy()
+def extract_symaro_data(engine):
+    data = {}
+    for label, query in SYMARO_QUERIES.items():
+        data[label] = read_query(engine, query, label)
+    return data
 
+
+def extract_datamart_data(engine):
+    data = {}
+    for label, query in DATAMART_QUERIES.items():
+        data[label] = read_query(engine, query, label)
+    data["from_datamart_oper"] = data["from_datamart_oper"].drop_duplicates()
+    return data
+
+
+def extract_all(symaro_engine, datamart_engine):
+    data = {}
+    data.update(extract_symaro_data(symaro_engine))
+    data.update(extract_datamart_data(datamart_engine))
+    return data
