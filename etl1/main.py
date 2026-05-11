@@ -3,11 +3,8 @@ import logging
 import time
 from pathlib import Path
 
-from config import APP_VERSION, connect_to_datamart_db, connect_to_symaro_db
-from extract import (
-    extract_datamart_reference,
-    extract_symaro_data,
-)
+from config import connect_to_datamart_db, connect_to_symaro_db
+from extract import extract_datamart_reference, extract_symaro_data
 from load import load_created_reference, load_updated_reference
 from transform import build_reference_delta, build_symaro_reference
 
@@ -34,11 +31,6 @@ logger = logging.getLogger(__name__)
 
 def run_etl(dry_run=False):
     start_time = time.perf_counter()
-
-    logger.info(f"Run ETL Symaro ref oper to datamart - version {APP_VERSION}...")
-
-    symaro_engine = None
-    dmp_engine = None
 
     try:
         symaro_engine = connect_to_symaro_db()
