@@ -2,190 +2,349 @@ import logging
 
 import pandas as pd
 
+from extract import extract_dbiltr_param, extract_dbiltr_spec, extract_tpr
 
 logger = logging.getLogger(__name__)
+VERSION = "v.3.0-python"
 
 
-def latest_by_timestamp(df, group_column, timestamp_column):
+PARAM_COLUMNS = [
+    "pcm_ref_id",
+    "parameter_id",
+    "parameter_name",
+    "unit",
+    "pcm_group",
+    "merge_type",
+    "process_option",
+    "module",
+    "pcell",
+    "slm",
+    "npnp_id2",
+    "parameter_id2",
+    "parameter_name2",
+    "unit2",
+    "reptseq",
+    "report_variable",
+]
+
+PARAM_COMPARE_COLUMNS = [
+    "npnp_id",
+    "isis_techno",
+    "isis_tpr",
+    "parameter_id",
+    "parameter_name",
+    "unit",
+    "pcm_group",
+    "merge_type",
+    "process_option",
+    "module",
+    "pcell",
+    "slm",
+    "npnp_id2",
+    "parameter_id2",
+    "parameter_name2",
+    "unit2",
+    "reptseq",
+    "report_variable",
+]
+
+SPEC_VALUE_COLUMNS = [
+    "lsl",
+    "usl",
+    "low_control_limit",
+    "high_control_limit",
+    "low_cens_limit",
+    "high_cens_limit",
+    "lsl3",
+    "usl3",
+    "target",
+    "type",
+    "cr",
+    "cpk_flag",
+]
+
+
+def _ensure_columns(df, columns):
     result = df.copy()
-    result[timestamp_column] = pd.to_datetime(result[timestamp_column])
-    latest = (
-        result.groupby(group_column, as_index=False)[timestamp_column]
-        .max()
-        .rename(columns={timestamp_column: "last_value"})
-    )
-    result = result.merge(
-        latest,
-        left_on=[group_column, timestamp_column],
-        right_on=[group_column, "last_value"],
-    )
-    return result.drop(columns=["last_value"]).drop_duplicates()
-
-
-def build_alternative_routes(data):
-    df_oper = data["oper"].drop_duplicates().copy()
-    df_rattachement = data["rattachement"].drop_duplicates().copy()
-    df_destination = data["destination"].drop_duplicates().copy()
-    df_route = data["route"].drop_duplicates().copy()
-    df_from_datamart = data["from_datamart_oper"].drop_duplicates().copy()
-
-    df_oper["OPE_UPD_TIME"] = pd.to_datetime(df_oper["OPE_UPD_TIME"])
-    df_route["RTE_UPD_TIME"] = pd.to_datetime(df_route["RTE_UPD_TIME"])
-    df_route_latest = latest_by_timestamp(df_route, "RTE_NAME", "RTE_UPD_TIME")
-
-    df_or = df_oper.merge(df_rattachement, left_on="OPE_ID", right_on="RAT_OPE_ID")
-    df_ord = df_or.merge(df_destination, left_on="RAT_ID", right_on="DEST_RAT_ID")
-    df_ordr = df_ord.merge(df_route_latest, left_on="DEST_ROUTE_ID", right_on="RTE_ID")
-    df_ordrr = df_ordr.merge(
-        df_route_latest,
-        left_on="RAT_ROUTE_ID",
-        right_on="RTE_ID",
-        how="left",
-        suffixes=(".x", ".y"),
-    )
-    df_ordro = df_from_datamart.merge(
-        df_ordrr,
-        left_on="operation",
-        right_on="OPE_NAME",
-    )
-
-    df_ordro = df_ordro[
-        (df_ordro["RTE_NAME.y"] == df_ordro["route"])
-        | (df_ordro["RTE_NAME.y"].isna())
-    ][["operation", "route", "RTE_NAME.x"]].drop_duplicates()
-
-    df_ordro = df_ordro.reset_index(drop=True)
-    df_ordro["alt"] = (
-        df_ordro.groupby(["operation", "route"]).cumcount() + 1
-    ).map(lambda value: f"alt_{value}")
-
-    df_ordro_l = (
-        df_ordro.pivot_table(
-            index=["operation", "route"],
-            columns="alt",
-            values="RTE_NAME.x",
-            aggfunc="first",
-        )
-        .reset_index()
-        .rename_axis(None, axis=1)
-    )
-
-    return df_ordro, df_ordro_l
-
-
-def split_process_family(df):
-    result = df.copy()
-    split_values = result["local_process_family"].astype("string").str.split(
-        r"[^A-Za-z0-9.]+",
-        n=1,
-        expand=True,
-        regex=True,
-    )
-
-    result["process_family"] = split_values[0]
-    result["Route"] = split_values[1] if split_values.shape[1] > 1 else pd.NA
+    for column in columns:
+        if column not in result.columns:
+            result[column] = pd.NA
     return result
 
 
-def build_device_routes(df_device):
-    df_device = split_process_family(df_device)
-    route_text = df_device["Route"].astype("string")
-
-    df_device["route_1"] = route_text.str.slice(0, 2) + "00"
-    df_device["route_2"] = route_text.str.slice(2, 4) + "00"
-    df_device["route_3"] = route_text.str.slice(4, 6) + "00"
-
-    df_device_l = df_device.melt(
-        id_vars=["device_id", "local_process_family", "process_family", "Route"],
-        value_vars=["route_1", "route_2", "route_3"],
-        var_name="temp",
-        value_name="Routes",
-    )
-
-    return df_device_l.dropna(subset=["Routes"])
+def _normalize_text(df, columns, default=""):
+    result = _ensure_columns(df, columns)
+    for column in columns:
+        result[column] = result[column].fillna(default).astype(str).str.strip()
+    return result
 
 
-def build_final_routes(data, df_ordro_l):
-    df_device_l = build_device_routes(data["device"])
-    df_from_datamart = data["from_datamart_oper"].drop_duplicates()
-
-    df_route_oper = df_device_l.merge(
-        df_from_datamart,
-        left_on="Routes",
-        right_on="route",
-        how="left",
-    )
-    df_route_oper_alt = df_route_oper.merge(
-        df_ordro_l,
-        left_on=["Routes", "operation"],
-        right_on=["route", "operation"],
-        how="left",
-        suffixes=("", "_altref"),
-    )
-
-    alt_columns = [column for column in df_route_oper_alt.columns if column.startswith("alt_")]
-
-    if alt_columns:
-        df_route_oper_alt_l = df_route_oper_alt.melt(
-            id_vars=[column for column in df_route_oper_alt.columns if column not in alt_columns],
-            value_vars=alt_columns,
-            var_name="tempo",
-            value_name="alt",
-        ).dropna(subset=["alt"])
-    else:
-        df_route_oper_alt_l = df_route_oper_alt.copy()
-        df_route_oper_alt_l["alt"] = pd.NA
-
-    df_principal = (
-        df_route_oper_alt_l[["process_family", "Routes", "device_id"]]
-        .drop_duplicates()
-        .assign(type="Main")
-        .rename(columns={"Routes": "route"})
-    )
-
-    df_alternative = (
-        df_route_oper_alt_l[["process_family", "alt", "device_id"]]
-        .dropna(subset=["alt"])
-        .drop_duplicates()
-        .assign(type="Alternative")
-        .rename(columns={"alt": "route"})
-    )
-
-    df_final = pd.concat([df_principal, df_alternative], ignore_index=True)
-    df_final["process_family"] = df_final["process_family"].fillna("MISC")
-
-    return df_final[["process_family", "route", "device_id", "type"]]
+def _normalize_int(series):
+    return pd.to_numeric(series, errors="coerce").astype("Int64")
 
 
 def anti_join(left, right, columns):
-    existing = right[columns].drop_duplicates()
-    merged = left.merge(existing, on=columns, how="left", indicator=True)
-    return merged[merged["_merge"] == "left_only"].drop(columns=["_merge"])
+    left_work = _ensure_columns(left, columns)
+    right_work = _ensure_columns(right, columns)
+    keys = right_work[columns].drop_duplicates()
+    merged = left_work.merge(keys, on=columns, how="left", indicator=True)
+    return merged.loc[merged["_merge"] == "left_only"].drop(columns="_merge")
 
 
-def transform_all(data):
-    logger.info("Starting transformations")
-    df_ordro, df_ordro_l = build_alternative_routes(data)
-    df_final = build_final_routes(data, df_ordro_l)
+def build_master_changes(settings, df_prod_npnpid, df_ref_master):
+    existing_npnpid = df_ref_master[["npnp_id"]].drop_duplicates()
+    new_npnpid = anti_join(df_prod_npnpid, existing_npnpid, ["npnp_id"])
 
-    df_new_cp = anti_join(
-        data["device_cp"],
-        data["from_datamart_cp"],
-        ["product_code", "device_id"],
+    current_tpr = extract_tpr(settings, existing_npnpid["npnp_id"])
+    current_tpr["load_file_name"] = "DBILTR_sql"
+    current_tpr["comment"] = (
+        current_tpr["isis_techno"].astype(str)
+        + " "
+        + current_tpr["isis_tpr"].astype(str)
+        + " "
+        + current_tpr["npnp_id"].astype(str)
+        + f" - load with DBILTR_to_datamart_pcm_ref.R version {VERSION}"
     )
-    df_new_route = anti_join(
-        df_final,
-        data["from_datamart_route"],
-        ["process_family", "device_id", "route", "type"],
+    current_tpr["pcm_ref_fra_datetime"] = settings["reference_datetime"]
+    current_tpr = current_tpr[
+        ["npnp_id", "pcm_ref_fra_datetime", "load_file_name", "comment", "isis_techno", "isis_tpr"]
+    ]
+
+    updated_master = anti_join(
+        current_tpr,
+        df_ref_master,
+        ["npnp_id", "isis_techno", "isis_tpr"],
+    )
+    updated_master = updated_master.merge(
+        df_ref_master[["pcm_ref_id", "npnp_id"]].drop_duplicates(),
+        on="npnp_id",
+        how="inner",
+    )
+    updated_master = updated_master[
+        ["pcm_ref_id", "npnp_id", "pcm_ref_fra_datetime", "load_file_name", "comment", "isis_techno", "isis_tpr"]
+    ].drop_duplicates()
+
+    if new_npnpid.empty:
+        created_master = pd.DataFrame(
+            columns=["npnp_id", "pcm_ref_fra_datetime", "load_file_name", "comment", "isis_techno", "isis_tpr"]
+        )
+    else:
+        created_master = extract_tpr(settings, new_npnpid["npnp_id"])
+        created_master["load_file_name"] = "DBILTR_sql"
+        created_master["comment"] = (
+            created_master["isis_techno"].astype(str)
+            + " "
+            + created_master["isis_tpr"].astype(str)
+            + " "
+            + created_master["npnp_id"].astype(str)
+            + f" - load with DBILTR_to_datamart_pcm_ref.R version {VERSION}"
+        )
+        created_master["pcm_ref_fra_datetime"] = settings["reference_datetime"]
+        created_master = created_master[
+            ["npnp_id", "pcm_ref_fra_datetime", "load_file_name", "comment", "isis_techno", "isis_tpr"]
+        ].drop_duplicates()
+
+    return created_master, updated_master
+
+
+def build_param_changes(settings, df_ref_param):
+    text_columns = [
+        "parameter_name",
+        "unit",
+        "pcm_group",
+        "merge_type",
+        "process_option",
+        "module",
+        "pcell",
+        "slm",
+        "npnp_id2",
+        "parameter_name2",
+        "unit2",
+        "report_variable",
+    ]
+    df_ref_param = _normalize_text(df_ref_param, text_columns)
+    ref_master = df_ref_param[["pcm_ref_id", "npnp_id", "isis_techno", "isis_tpr"]].drop_duplicates()
+
+    dbiltr_param = extract_dbiltr_param(settings, ref_master["isis_techno"], ref_master["isis_tpr"])
+    dbiltr_param = _normalize_text(dbiltr_param, text_columns)
+    dbiltr_param["parameter_id2"] = _normalize_int(dbiltr_param["parameter_id2"])
+    dbiltr_param["merge_type"] = dbiltr_param["merge_type"].replace("", pd.NA).fillna("GROUPE")
+
+    param_by_npnp = dbiltr_param.merge(ref_master, on=["isis_techno", "isis_tpr"], how="inner").drop_duplicates()
+
+    new_param = anti_join(
+        param_by_npnp,
+        df_ref_param,
+        ["npnp_id", "isis_techno", "isis_tpr", "parameter_id"],
+    )
+    new_param = new_param[PARAM_COLUMNS].drop_duplicates()
+
+    param_by_npnp = _normalize_text(param_by_npnp, text_columns)
+    df_ref_param = _normalize_text(df_ref_param, text_columns)
+
+    updated_param = anti_join(param_by_npnp, df_ref_param, PARAM_COMPARE_COLUMNS)
+    updated_param = updated_param[PARAM_COLUMNS].drop_duplicates()
+    updated_param = anti_join(updated_param, new_param, PARAM_COLUMNS)
+    updated_param = updated_param.merge(
+        df_ref_param[["ref_param_id", "pcm_ref_id", "parameter_id"]].drop_duplicates(),
+        on=["pcm_ref_id", "parameter_id"],
+        how="inner",
+    )
+    updated_param = updated_param[["ref_param_id"] + PARAM_COLUMNS].drop_duplicates()
+
+    return new_param, updated_param
+
+
+def build_spec_changes(settings, df_ref_spec, df_ref_npnp, df_ref_param_lookup, df_ref_spec_lookup):
+    df_ref_spec = df_ref_spec.drop_duplicates()
+    ref_param = df_ref_spec[["ref_param_id", "parameter_id", "npnp_id", "isis_techno", "isis_tpr"]].drop_duplicates()
+    dbiltr_spec = extract_dbiltr_spec(settings, ref_param["isis_techno"], ref_param["isis_tpr"])
+
+    for column in ["parameter_id", "isis_techno", "isis_tpr"]:
+        dbiltr_spec[column] = dbiltr_spec[column].astype(str).str.strip()
+        df_ref_spec[column] = df_ref_spec[column].astype(str).str.strip()
+
+    dbiltr_spec = dbiltr_spec.merge(
+        df_ref_npnp.drop_duplicates(),
+        on=["isis_tpr", "isis_techno"],
+        how="inner",
+    ).drop_duplicates()
+
+    new_key = ["npnp_id", "parameter_id", "isis_techno", "isis_tpr", "version"]
+    new_spec = anti_join(dbiltr_spec, df_ref_spec, new_key)
+    new_spec = new_spec[
+        ["npnp_id", "isis_techno", "isis_tpr", "parameter_id", "version"] + SPEC_VALUE_COLUMNS
+    ].drop_duplicates()
+    new_spec["parameter_id"] = pd.to_numeric(new_spec["parameter_id"], errors="coerce")
+    new_spec = new_spec.merge(
+        df_ref_param_lookup.drop_duplicates(),
+        on=["isis_techno", "isis_tpr", "npnp_id", "parameter_id"],
+        how="left",
     )
 
-    logger.info("RETURNCODE=0")
-    logger.info("Transformations OK")
+    spec_for_compare = dbiltr_spec.copy()
+    ref_for_compare = df_ref_spec.copy()
+    for frame in [spec_for_compare, ref_for_compare]:
+        for column in SPEC_VALUE_COLUMNS:
+            if column in ["type", "cpk_flag"]:
+                frame[column] = frame[column].fillna("").astype(str).str.strip()
+            else:
+                frame[column] = frame[column].where(frame[column].notna(), "NULL")
 
-    return {
-        "alternative_routes": df_ordro,
-        "alternative_routes_wide": df_ordro_l,
-        "final_routes": df_final,
-        "new_cp": df_new_cp,
-        "new_route": df_new_route,
-    }
+    compare_columns = new_key + SPEC_VALUE_COLUMNS
+    updated_spec = anti_join(spec_for_compare, ref_for_compare, compare_columns)
+    updated_spec = updated_spec[
+        ["npnp_id", "isis_techno", "isis_tpr", "parameter_id", "version"] + SPEC_VALUE_COLUMNS
+    ].drop_duplicates()
+
+    new_spec_compare = new_spec.copy()
+    for column in SPEC_VALUE_COLUMNS:
+        if column in ["type", "cpk_flag"]:
+            new_spec_compare[column] = new_spec_compare[column].fillna("").astype(str).str.strip()
+        else:
+            new_spec_compare[column] = new_spec_compare[column].where(new_spec_compare[column].notna(), "NULL")
+
+    updated_spec = anti_join(
+        updated_spec,
+        new_spec_compare,
+        ["npnp_id", "isis_techno", "isis_tpr", "version"] + SPEC_VALUE_COLUMNS,
+    ).drop_duplicates()
+    updated_spec = updated_spec.merge(
+        df_ref_spec_lookup.drop_duplicates(),
+        on=["npnp_id", "isis_techno", "isis_tpr", "parameter_id", "version"],
+        how="left",
+    )
+
+    updated_spec = updated_spec[["ref_param_version_id", "ref_param_id", "version"] + SPEC_VALUE_COLUMNS].drop_duplicates()
+    new_spec = new_spec[["ref_param_id", "version"] + SPEC_VALUE_COLUMNS].drop_duplicates()
+    new_spec = new_spec[new_spec["ref_param_id"].notna()]
+
+    return new_spec, updated_spec
+
+
+def _make_vgroup(df):
+    result = df[["ref_param_id", "version", "lsl", "usl", "target"]].drop_duplicates().copy()
+    result["s_target"] = result["target"].astype(str)
+    result["s_lsl"] = result["lsl"].astype(str)
+    result["s_usl"] = result["usl"].astype(str)
+    return result[["ref_param_id", "version", "s_target", "s_lsl", "s_usl"]].sort_values(
+        ["ref_param_id", "version"]
+    )
+
+
+def _assign_vgroups(df):
+    result = df.copy()
+    result["s_ref_param_id"] = "R" + result["ref_param_id"].astype(str)
+    groups = (
+        result[["s_ref_param_id", "s_target", "s_lsl", "s_usl"]]
+        .drop_duplicates()
+        .sort_values(["s_ref_param_id", "s_lsl", "s_usl", "s_target"])
+        .copy()
+    )
+    groups["vgroup"] = groups.groupby("s_ref_param_id").cumcount() + 1
+    result = result.merge(groups, on=["s_ref_param_id", "s_target", "s_lsl", "s_usl"], how="left")
+    return result[["vgroup", "ref_param_id", "version", "s_target", "s_lsl", "s_usl"]].drop_duplicates()
+
+
+def build_vgroup_changes(df_ref_spec_full, df_ref_vgroup):
+    vgroup_source = _make_vgroup(df_ref_spec_full.drop_duplicates())
+    df_ref_vgroup = df_ref_vgroup.drop_duplicates()
+
+    new_ref_param = anti_join(vgroup_source, df_ref_vgroup, ["ref_param_id"])
+
+    old_ref_param_ids = df_ref_vgroup[["ref_param_id"]].drop_duplicates()
+    old_ref_param = vgroup_source.merge(old_ref_param_ids, on="ref_param_id", how="inner")
+
+    new_version = anti_join(old_ref_param, df_ref_vgroup, ["ref_param_id", "version"])
+    new_version = anti_join(new_version, new_ref_param, ["ref_param_id", "version", "s_target", "s_lsl", "s_usl"])
+
+    old_versions = df_ref_vgroup[["ref_param_id", "version"]].drop_duplicates()
+    old_ref_param_version = old_ref_param.merge(old_versions, on=["ref_param_id", "version"], how="inner")
+
+    updated_limits = anti_join(
+        old_ref_param_version,
+        df_ref_vgroup,
+        ["ref_param_id", "version", "s_target", "s_lsl", "s_usl"],
+    )
+
+    new_triplet = anti_join(
+        new_version,
+        df_ref_vgroup,
+        ["ref_param_id", "s_target", "s_lsl", "s_usl"],
+    )
+    old_triplet = new_version.merge(
+        df_ref_vgroup[["ref_param_id", "s_target", "s_lsl", "s_usl"]].drop_duplicates(),
+        on=["ref_param_id", "s_target", "s_lsl", "s_usl"],
+        how="inner",
+    )
+
+    to_delete = pd.concat([new_triplet, updated_limits], ignore_index=True).drop_duplicates()
+    delete_ref_param_ids = to_delete[["ref_param_id"]].drop_duplicates()
+
+    rebuild_vgroup = pd.DataFrame(columns=["vgroup", "ref_param_id", "version", "s_target", "s_lsl", "s_usl"])
+    if not delete_ref_param_ids.empty:
+        previous_for_deleted = delete_ref_param_ids.merge(df_ref_vgroup, on="ref_param_id", how="inner")
+        no_limits_previous = previous_for_deleted.drop(columns=["vgroup", "s_target", "s_lsl", "s_usl"])
+        no_limits_new = to_delete.drop(columns=["s_target", "s_lsl", "s_usl"])
+        all_versions = pd.concat([no_limits_previous, no_limits_new], ignore_index=True).drop_duplicates()
+
+        dbiltr_limits = all_versions.merge(to_delete, on=["ref_param_id", "version"], how="inner")
+        missing = anti_join(all_versions, to_delete, ["ref_param_id", "version"])
+        missing = missing.merge(
+            previous_for_deleted.drop(columns=["vgroup"]),
+            on=["ref_param_id", "version"],
+            how="inner",
+        )
+        rebuild_vgroup = _assign_vgroups(pd.concat([dbiltr_limits, missing], ignore_index=True).drop_duplicates())
+
+    new_ref_param_vgroup = _assign_vgroups(new_ref_param) if not new_ref_param.empty else rebuild_vgroup.iloc[0:0]
+
+    current_vgroups = df_ref_vgroup[["vgroup", "ref_param_id", "s_target", "s_lsl", "s_usl"]].drop_duplicates()
+    old_triplet = old_triplet.merge(
+        current_vgroups,
+        on=["ref_param_id", "s_target", "s_lsl", "s_usl"],
+        how="left",
+    )
+    old_triplet = old_triplet[["vgroup", "ref_param_id", "version", "s_target", "s_lsl", "s_usl"]].drop_duplicates()
+
+    return delete_ref_param_ids, rebuild_vgroup, new_ref_param_vgroup, old_triplet

@@ -2,66 +2,120 @@ import logging
 import time
 from pathlib import Path
 
-from config import connect_to_datamart_db, connect_to_symaro_db
-from extract import extract_all
-from load import load_datamart
-from transform import transform_all
+from config import connect_to_db, get_settings
+from extract import extract_datamart_tables, extract_dbprod_npnpid, read_datamart
+from load import load_master, load_param, load_spec, load_vgroup
+from transform import (
+    build_master_changes,
+    build_param_changes,
+    build_spec_changes,
+    build_vgroup_changes,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
+VERSION = "v.3.0-python"
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler(
-            LOG_DIR / "etl_symaro_to_datamart.log",
-            mode="w",
-            encoding="utf-8"
-        ),
-        logging.StreamHandler()
-    ]
+        logging.FileHandler(LOG_DIR / "etl_pcm_ref.log", mode="w", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
 )
 
 logger = logging.getLogger(__name__)
 
 
 def main():
-    start_time = time.perf_counter()
-
+    start = time.perf_counter()
+    datamart_engine = None
     try:
-        symaro_engine = connect_to_symaro_db()
-        datamart_engine = connect_to_datamart_db()
+        settings = get_settings()
+        datamart_engine = connect_to_db()
+        logger.info("DBILTR_to_datamart_pcm_ref.py - version %s", VERSION)
 
-        logger.info("successful connected to the DB...")
+        prod_npnpid = extract_dbprod_npnpid(settings)
+        datamart = extract_datamart_tables(datamart_engine)
 
-        data = extract_all(
-            symaro_engine,
-            datamart_engine
+        created_master, updated_master = build_master_changes(
+            settings,
+            prod_npnpid,
+            datamart["ref_master"],
         )
-
-        results = transform_all(data)
-        counts = load_datamart(
+        master_inserted, master_updated = load_master(
             datamart_engine,
-            results
+            {
+                "created_master": created_master,
+                "updated_master": updated_master,
+            },
         )
 
-        elapsed = time.perf_counter() - start_time
+        datamart = extract_datamart_tables(datamart_engine)
+        new_param, updated_param = build_param_changes(settings, datamart["ref_param"])
+        param_inserted, param_updated = load_param(
+            datamart_engine,
+            {
+                "new_param": new_param,
+                "updated_param": updated_param,
+            },
+        )
 
-        logger.info(f"{counts['route_rows']} route line(s) inserted")
-        logger.info(f"{counts['cp_rows']} cp line(s) inserted")
-        logger.info(f"ETL end in {elapsed:.2f} sec")
+        datamart = extract_datamart_tables(datamart_engine)
+        new_spec, updated_spec = build_spec_changes(
+            settings,
+            datamart["ref_spec"],
+            datamart["ref_npnp"],
+            datamart["ref_param_lookup"],
+            datamart["ref_spec_lookup"],
+        )
+        spec_inserted, spec_updated = load_spec(
+            datamart_engine,
+            {
+                "new_spec": new_spec,
+                "updated_spec": updated_spec,
+            },
+        )
+
+        ref_spec_after_load = read_datamart(
+            datamart_engine,
+            "SELECT * FROM t_pcm_ref_spec",
+            "t_pcm_ref_spec after load",
+        )
+        ref_vgroup = read_datamart(
+            datamart_engine,
+            "SELECT * FROM t_pcm_ref_vgroup",
+            "t_pcm_ref_vgroup after load",
+        )
+        delete_ids, rebuild_vgroup, new_vgroup, old_triplets = build_vgroup_changes(
+            ref_spec_after_load,
+            ref_vgroup,
+        )
+        vgroup_counts = load_vgroup(
+            datamart_engine,
+            {
+                "delete_vgroup_ids": delete_ids,
+                "rebuild_vgroup": rebuild_vgroup,
+                "new_vgroup": new_vgroup,
+                "old_triplet_vgroup": old_triplets,
+            },
+        )
+
+        elapsed = time.perf_counter() - start
+        logger.info("Master inserted=%s updated=%s", master_inserted, master_updated)
+        logger.info("Param inserted=%s updated=%s", param_inserted, param_updated)
+        logger.info("Spec inserted=%s updated=%s", spec_inserted, spec_updated)
+        logger.info("Vgroup counts=%s", vgroup_counts)
+        logger.info("RETURNCODE=0")
+        logger.info("ETL end in %.2f sec", elapsed)
 
     except Exception:
-        logger.exception("Fatal error, stop ETL...")
+        logger.exception("RETURNCODE=2")
         raise
-
     finally:
-        if symaro_engine is not None:
-            symaro_engine.dispose()
-
         if datamart_engine is not None:
             datamart_engine.dispose()
 
