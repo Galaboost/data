@@ -21,26 +21,33 @@ def connect_to_db():
     )
 
 
-def get_dbprod_config():
-    return {
-        "dsn": os.environ.get("DBPROD_DSN", "DBPROD"),
-        "user": os.environ["DBPROD_USER"],
-        "password": os.environ["DBPROD_PASSWORD"],
-    }
+def _connect_from_url_or_parts(prefix, default_database):
+    url = os.environ.get(f"{prefix}_URL")
+    if url:
+        return create_engine(url, pool_pre_ping=True)
+
+    user = os.environ[f"{prefix}_USER"]
+    password = os.environ[f"{prefix}_PASSWORD"]
+    host = os.environ.get(f"{prefix}_HOST", "localhost")
+    port = os.environ.get(f"{prefix}_PORT", "3306")
+    database = os.environ.get(f"{prefix}_DATABASE", default_database)
+
+    return create_engine(
+        f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}",
+        pool_pre_ping=True,
+    )
 
 
-def get_dbiltr_config():
-    return {
-        "dsn": os.environ.get("DBILTR_DSN", os.environ.get("DBISIS_DSN", "DBILTR")),
-        "user": os.environ["DBILTR_USER"],
-        "password": os.environ["DBILTR_PASSWORD"],
-    }
+def connect_to_dbprod():
+    return _connect_from_url_or_parts("DBPROD", "DBPROD")
+
+
+def connect_to_dbiltr():
+    return _connect_from_url_or_parts("DBILTR", "DBILTR")
 
 
 def get_settings():
     return {
-        "dbprod": get_dbprod_config(),
-        "dbiltr": get_dbiltr_config(),
         "date_start": (
             datetime.today()
             - timedelta(days=int(os.environ.get("DATE_START_DAYS", "45")))

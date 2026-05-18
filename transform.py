@@ -91,11 +91,11 @@ def anti_join(left, right, columns):
     return merged.loc[merged["_merge"] == "left_only"].drop(columns="_merge")
 
 
-def build_master_changes(settings, df_prod_npnpid, df_ref_master):
+def build_master_changes(settings, dbiltr_engine, df_prod_npnpid, df_ref_master):
     existing_npnpid = df_ref_master[["npnp_id"]].drop_duplicates()
     new_npnpid = anti_join(df_prod_npnpid, existing_npnpid, ["npnp_id"])
 
-    current_tpr = extract_tpr(settings, existing_npnpid["npnp_id"])
+    current_tpr = extract_tpr(dbiltr_engine, existing_npnpid["npnp_id"])
     current_tpr["load_file_name"] = "DBILTR_sql"
     current_tpr["comment"] = (
         current_tpr["isis_techno"].astype(str)
@@ -129,7 +129,7 @@ def build_master_changes(settings, df_prod_npnpid, df_ref_master):
             columns=["npnp_id", "pcm_ref_fra_datetime", "load_file_name", "comment", "isis_techno", "isis_tpr"]
         )
     else:
-        created_master = extract_tpr(settings, new_npnpid["npnp_id"])
+        created_master = extract_tpr(dbiltr_engine, new_npnpid["npnp_id"])
         created_master["load_file_name"] = "DBILTR_sql"
         created_master["comment"] = (
             created_master["isis_techno"].astype(str)
@@ -147,7 +147,7 @@ def build_master_changes(settings, df_prod_npnpid, df_ref_master):
     return created_master, updated_master
 
 
-def build_param_changes(settings, df_ref_param):
+def build_param_changes(dbiltr_engine, df_ref_param):
     text_columns = [
         "parameter_name",
         "unit",
@@ -165,7 +165,7 @@ def build_param_changes(settings, df_ref_param):
     df_ref_param = _normalize_text(df_ref_param, text_columns)
     ref_master = df_ref_param[["pcm_ref_id", "npnp_id", "isis_techno", "isis_tpr"]].drop_duplicates()
 
-    dbiltr_param = extract_dbiltr_param(settings, ref_master["isis_techno"], ref_master["isis_tpr"])
+    dbiltr_param = extract_dbiltr_param(dbiltr_engine, ref_master["isis_techno"], ref_master["isis_tpr"])
     dbiltr_param = _normalize_text(dbiltr_param, text_columns)
     dbiltr_param["parameter_id2"] = _normalize_int(dbiltr_param["parameter_id2"])
     dbiltr_param["merge_type"] = dbiltr_param["merge_type"].replace("", pd.NA).fillna("GROUPE")
@@ -195,10 +195,10 @@ def build_param_changes(settings, df_ref_param):
     return new_param, updated_param
 
 
-def build_spec_changes(settings, df_ref_spec, df_ref_npnp, df_ref_param_lookup, df_ref_spec_lookup):
+def build_spec_changes(dbiltr_engine, df_ref_spec, df_ref_npnp, df_ref_param_lookup, df_ref_spec_lookup):
     df_ref_spec = df_ref_spec.drop_duplicates()
     ref_param = df_ref_spec[["ref_param_id", "parameter_id", "npnp_id", "isis_techno", "isis_tpr"]].drop_duplicates()
-    dbiltr_spec = extract_dbiltr_spec(settings, ref_param["isis_techno"], ref_param["isis_tpr"])
+    dbiltr_spec = extract_dbiltr_spec(dbiltr_engine, ref_param["isis_techno"], ref_param["isis_tpr"])
 
     for column in ["parameter_id", "isis_techno", "isis_tpr"]:
         dbiltr_spec[column] = dbiltr_spec[column].astype(str).str.strip()

@@ -91,13 +91,10 @@ def read_datamart(engine, query, label):
         return pd.read_sql_query(text(query), conn).drop_duplicates().reset_index(drop=True)
 
 
-def read_odbc(config, query, label):
-    logger.info("Extract ODBC %s: %s", config["dsn"], label)
-    import pyodbc
-
-    connection_string = f"DSN={config['dsn']};UID={config['user']};PWD={config['password']}"
-    with pyodbc.connect(connection_string) as conn:
-        return pd.read_sql_query(query, conn).drop_duplicates().reset_index(drop=True)
+def read_source(engine, query, label):
+    logger.info("Extract source: %s", label)
+    with engine.connect() as conn:
+        return pd.read_sql_query(text(query), conn).drop_duplicates().reset_index(drop=True)
 
 
 def sql_list(values):
@@ -107,13 +104,13 @@ def sql_list(values):
     return ", ".join("'" + value.replace("'", "''") + "'" for value in clean)
 
 
-def extract_dbprod_npnpid(settings):
+def extract_dbprod_npnpid(settings, dbprod_engine):
     query = f"""
         SELECT NLOCFAB, NPNPID, VERSION, CPROD, DDTEST
         FROM DBPROD.T_TLOTPNPI
         WHERE DDTEST >= '{settings["date_start"]}'
     """
-    df = read_odbc(settings["dbprod"], query, "recent npnp_id from T_TLOTPNPI")
+    df = read_source(dbprod_engine, query, "recent npnp_id from T_TLOTPNPI")
     if df.empty:
         raise RuntimeError("ERROR FOUND ON DBPROD")
 
@@ -126,7 +123,7 @@ def extract_dbprod_npnpid(settings):
     )
 
 
-def extract_tpr(settings, npnp_ids):
+def extract_tpr(dbiltr_engine, npnp_ids):
     query = f"""
         SELECT
             NPNPID AS npnp_id,
@@ -135,14 +132,14 @@ def extract_tpr(settings, npnp_ids):
         FROM DBILTR.T_TPR
         WHERE NPNPID IN ({sql_list(npnp_ids)})
     """
-    df = read_odbc(settings["dbiltr"], query, "TPR/TECHNO references")
+    df = read_source(dbiltr_engine, query, "TPR/TECHNO references")
     if df.empty:
         raise RuntimeError("ERROR FOUND ON DBILTR NPNPID TECHNO")
     df.columns = [column.lower() for column in df.columns]
     return df
 
 
-def extract_dbiltr_param(settings, technos, tprs):
+def extract_dbiltr_param(dbiltr_engine, technos, tprs):
     query = f"""
         SELECT
             TECHNO AS isis_techno,
@@ -166,14 +163,14 @@ def extract_dbiltr_param(settings, technos, tprs):
         WHERE TECHNO IN ({sql_list(technos)})
         AND TPR IN ({sql_list(tprs)})
     """
-    df = read_odbc(settings["dbiltr"], query, "parameter references")
+    df = read_source(dbiltr_engine, query, "parameter references")
     if df.empty:
         raise RuntimeError("ERROR FOUND ON DBILTR REF")
     df.columns = [column.lower() for column in df.columns]
     return df
 
 
-def extract_dbiltr_spec(settings, technos, tprs):
+def extract_dbiltr_spec(dbiltr_engine, technos, tprs):
     query = f"""
         SELECT
             lm.NPARAM AS parameter_id,
@@ -200,7 +197,7 @@ def extract_dbiltr_spec(settings, technos, tprs):
         WHERE lm.TECHNO IN ({sql_list(technos)})
         AND lm.TPR IN ({sql_list(tprs)})
     """
-    df = read_odbc(settings["dbiltr"], query, "parameter specs")
+    df = read_source(dbiltr_engine, query, "parameter specs")
     if df.empty:
         raise RuntimeError("ERROR FOUND ON DBILTR REF SPEC")
     df.columns = [column.lower() for column in df.columns]
