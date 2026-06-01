@@ -1,3 +1,4 @@
 modele/
 .env*
 __pycache__/
+.r*
