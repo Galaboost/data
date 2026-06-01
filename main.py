@@ -1,132 +1,82 @@
 import logging
 import time
-from pathlib import Path
 
-from config import connect_to_db, connect_to_dbiltr, connect_to_dbprod, get_settings
-from extract import extract_datamart_tables, extract_dbprod_npnpid, read_datamart
-from load import load_master, load_param, load_spec, load_vgroup
-from transform import (
-    build_master_changes,
-    build_param_changes,
-    build_spec_changes,
-    build_vgroup_changes,
+from config import (
+    archive_directory,
+    close_connection,
+    connect_to_dbprod,
+    connect_to_dmp,
+    get_nparam,
+    get_settings,
 )
+from extract import extract_available_nparams, extract_swt_profiles
+from load import update_allgood_archive, update_lot_archive, update_wafer_archive
 
 
-BASE_DIR = Path(__file__).resolve().parent
-VERSION = "v.3.0-python"
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "etl_pcm_ref.log", mode="w", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
-
+VERSION = "fra.eda_csv-python-v1"
 logger = logging.getLogger(__name__)
 
 
 def main():
     start = time.perf_counter()
-    datamart_engine = None
-    dbprod_engine = None
-    dbiltr_engine = None
+    settings = get_settings()
+    settings.log_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        handlers=[
+            logging.FileHandler(settings.log_dir / "eda_csv.log", mode="w", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
+
+    dbprod_connection = None
+    dmp_connection = None
     try:
-        settings = get_settings()
-        datamart_engine = connect_to_db()
-        dbprod_engine = connect_to_dbprod()
-        dbiltr_engine = connect_to_dbiltr()
-        logger.info("DBILTR_to_datamart_pcm_ref.py - version %s", VERSION)
+        logger.info("START script eda_csv Python - %s", VERSION)
+        logger.info("Date window: %s to %s", settings.start_date, settings.end_date)
 
-        prod_npnpid = extract_dbprod_npnpid(settings, dbprod_engine)
-        datamart = extract_datamart_tables(datamart_engine)
+        dbprod_connection = connect_to_dbprod()
+        dmp_connection = connect_to_dmp()
 
-        created_master, updated_master = build_master_changes(
-            settings,
-            dbiltr_engine,
-            prod_npnpid,
-            datamart["ref_master"],
-        )
-        master_inserted, master_updated = load_master(
-            datamart_engine,
-            {
-                "created_master": created_master,
-                "updated_master": updated_master,
-            },
-        )
+        profiles = extract_swt_profiles(dmp_connection)
+        profiles = profiles[profiles["techno"].isin(settings.active_technos)].reset_index(drop=True)
+        logger.info("Number of active profile rows: %s", len(profiles))
 
-        datamart = extract_datamart_tables(datamart_engine)
-        new_param, updated_param = build_param_changes(dbiltr_engine, datamart["ref_param"])
-        param_inserted, param_updated = load_param(
-            datamart_engine,
-            {
-                "new_param": new_param,
-                "updated_param": updated_param,
-            },
-        )
+        if profiles.empty:
+            raise RuntimeError("No active SWT profile found in t_profile_maps_master")
 
-        datamart = extract_datamart_tables(datamart_engine)
-        new_spec, updated_spec = build_spec_changes(
-            dbiltr_engine,
-            datamart["ref_spec"],
-            datamart["ref_npnp"],
-            datamart["ref_param_lookup"],
-            datamart["ref_spec_lookup"],
-        )
-        spec_inserted, spec_updated = load_spec(
-            datamart_engine,
-            {
-                "new_spec": new_spec,
-                "updated_spec": updated_spec,
-            },
-        )
+        for index, profile in enumerate(profiles.itertuples(index=False), start=1):
+            logger.info(
+                "%s/%s start techno=%s npnpid=%s version=%s",
+                index,
+                len(profiles),
+                profile.techno,
+                profile.npnpid,
+                profile.version,
+            )
 
-        ref_spec_after_load = read_datamart(
-            datamart_engine,
-            "SELECT * FROM t_pcm_ref_spec",
-            "t_pcm_ref_spec after load",
-        )
-        ref_vgroup = read_datamart(
-            datamart_engine,
-            "SELECT * FROM t_pcm_ref_vgroup",
-            "t_pcm_ref_vgroup after load",
-        )
-        delete_ids, rebuild_vgroup, new_vgroup, old_triplets = build_vgroup_changes(
-            ref_spec_after_load,
-            ref_vgroup,
-        )
-        vgroup_counts = load_vgroup(
-            datamart_engine,
-            {
-                "delete_vgroup_ids": delete_ids,
-                "rebuild_vgroup": rebuild_vgroup,
-                "new_vgroup": new_vgroup,
-                "old_triplet_vgroup": old_triplets,
-            },
-        )
+            directory = archive_directory(settings, profile.techno)
+            nparams = get_nparam(profile.techno)
+            if not nparams:
+                nparams = extract_available_nparams(dbprod_connection, profile.npnpid, profile.version)
+            if not nparams:
+                logger.info("No NPARAM for techno=%s npnpid=%s", profile.techno, profile.npnpid)
+                continue
 
-        elapsed = time.perf_counter() - start
-        logger.info("Master inserted=%s updated=%s", master_inserted, master_updated)
-        logger.info("Param inserted=%s updated=%s", param_inserted, param_updated)
-        logger.info("Spec inserted=%s updated=%s", spec_inserted, spec_updated)
-        logger.info("Vgroup counts=%s", vgroup_counts)
+            update_lot_archive(dbprod_connection, directory, profile, nparams, settings)
+            wafer_archive = update_wafer_archive(dbprod_connection, directory, profile, nparams, settings)
+            update_allgood_archive(directory, profile, wafer_archive)
+            logger.info("End profile npnpid=%s", profile.npnpid)
+
         logger.info("RETURNCODE=0")
-        logger.info("ETL end in %.2f sec", elapsed)
-
+        logger.info("END script in %.2f sec", time.perf_counter() - start)
     except Exception:
         logger.exception("RETURNCODE=2")
         raise
     finally:
-        if datamart_engine is not None:
-            datamart_engine.dispose()
-        if dbprod_engine is not None:
-            dbprod_engine.dispose()
-        if dbiltr_engine is not None:
-            dbiltr_engine.dispose()
+        close_connection(dbprod_connection)
+        close_connection(dmp_connection)
 
 
 if __name__ == "__main__":
