@@ -1,0 +1,80 @@
+[1] "Nb of pnp-version in profiles : 91"
+Error in data.table::fread(file = str_waf_csv, stringsAsFactors = FALSE) : 
+  File '/home/auemura@xfab.ads/share/EDASHARE/EDA_PUBLIC/CARAC/FWT_SOI/db7740w.csv' does not exist or is non-readable. getwd()=='/home/auemura@xfab.ads'
+Calls: f_update_allgood_wafer -> %>% -> eval -> eval -> <Anonymous>
+Execution halted
+of f_update_data_lot  
+INFO  [2025-04-18 06:45:36] nb of lots  7
+INFO  [2025-04-18 06:45:36] Number of new lots detected :  0
+INFO  [2025-04-18 06:45:37] end write csv update -->> END of f_update_data_wafer  
+INFO  [2025-04-18 06:45:37] END step i 
+INFO  [2025-04-18 06:45:37] 2 : start with  AH018 , npnpid =   9803 ,version :  1
+INFO  [2025-04-18 06:45:38] END step i 
+INFO  [2025-04-18 06:45:38] 3 : start with  AH018 , npnpid =   9805 ,version :  1
+INFO  [2025-04-18 06:45:39] END step i 
+INFO  [2025-04-18 06:45:39] 4 : start with  AH018 , npnpid =   9806 ,version :  1
+INFO  [2025-04-18 06:45:40] Number of  new lots :  0
+INFO  [2025-04-18 06:45:40] write update csv with new data -->> END of f_update_data_lot  
+INFO  [2025-04-18 06:45:41] nb of lots  3
+INFO  [2025-04-18 06:45:41] Number of new lots detected :  0
+INFO  [2025-04-18 06:45:42] end write csv update -->> END of f_update_data_wafer  
+INFO  [2025-04-18 06:45:42] END step i 
+INFO  [2025-04-18 06:45:42] 5 : start with  AH018 , npnpid =   9807 ,version :  1
+INFO  [2025-04-18 06:45:43] END step i 
+INFO  [2025-04-18 06:45:43] 6 : start with  AH018 , npnpid =   9808 ,version :  1
+INFO  [2025-04-18 06:45:44] END step i 
+INFO  [2025-04-18 06:45:44] 7 : start with  AH018 , npnpid =   9809 ,version :  1
+INFO  [2025-04-18 06:45:45] Number of  new lots :  0
+INFO  [2025-04-18 06:45:45] write update csv with new data -->> END of f_update_data_lot  
+INFO  [2025-04-18 06:45:46] nb of lots  1
+INFO  [2025-04-18 06:45:46] Number of new lots detected :  0
+INFO  [2025-04-18 06:45:46] end write csv update -->> END of f_update_data_wafer  
+INFO  [2025-04-18 06:45:46] END step i 
+INFO  [2025-04-18 06:45:46] 8 : start with  AH018 , npnpid =   9810 ,version :  1
+INFO  [2025-04-18 06:45:47] END step i 
+INFO  [2025-04-18 06:45:47] 9 : start with  AH018 , npnpid =   9811 ,version :  1
+INFO  [2025-04-18 06:45:48] Number of  new lots :  0
+INFO  [2025-04-18 06:45:48] write update csv with new data -->> END of f_update_data_lot  
+INFO  [2025-04-18 06:45:49] nb of lots  1
+INFO  [2025-04-18 06:45:49] Number of new lots detected :  0
+INFO  [2025-04-18 06:45:49] end write csv update -->> END of f_update_data_wafer  
+INFO  [2025-04-18 06:45:49] END step i 
+INFO  [2025-04-18 06:45:49] 10 : start with  C10N , npnpid =   7604 ,version :  9
+INFO  [2025-04-18 06:45:50] END step i 
+INFO  [2025-04-18 06:45:50] 11 : start with  C10N , npnpid =   7605 ,version :  9
+INFO  [2025-04-18 06:45:51] END step i 
+INFO  [2025-04-18 06:45:51] 12 : start with  C10N , npnpid =   7618 ,version :  9
+INFO  [2025-04-18 06:45:52] END step i 
+INFO  [2025-04-18 06:45:52] 13 : start with  C10N , npnpid =   7619 ,version :  9
+INFO  [2025-04-18 06:45:54] END step i 
+INFO  [2025-04-18 06:45:54] 14 : start with  C10N , npnpid =   7631 ,version :  8
+INFO  [2025-04-18 06:45:55] END step i 
+INFO  [2025-04-18 06:45:55] 15 : start with  C10N , npnpid =   7632 ,version :  8
+INFO  [2025-04-18 06:45:56] END step i 
+INFO  [2025-04-18 06:45:56] 16 : start with  C11N , npnpid =   9107 ,version :  1
+INFO  [2025-04-18 06:45:57] END step i 
+INFO  [2025-04-18 06:45:57] 17 : start with  T18AL , npnpid =   7389 ,version :  1
+INFO  [2025-04-18 06:45:59] END step i 
+INFO  [2025-04-18 06:45:59] 18 : start with  T18AL , npnpid =   7715 ,version :  1
+INFO  [2025-04-18 06:46:00] END step i 
+INFO  [2025-04-18 06:46:00] 19 : start with  T18B , npnpid =   7408 ,version :  1
+INFO  [2025-04-18 06:46:01] END step i 
+INFO  [2025-04-18 06:46:01] 20 : start with  T18B , npnpid =   7409 ,version :  1
+INFO  [2025-04-18 06:46:02] END step i 
+INFO  [2025-04-18 06:46:02] 21 : start with  T18B , npnpid =   7412 ,version :  1
+INFO  [2025-04-18 06:46:03] END step i 
+INFO  [2025-04-18 06:46:03] 22 : start with  T18B , npnpid =   7415 ,version :  1
+INFO  [2025-04-18 06:46:05] END step i 
+INFO  [2025-04-18 06:46:05] 23 : start with  T18B , npnpid =   7417 ,version :  1
+INFO  [2025-04-18 06:46:06] END step i 
+INFO  [2025-04-18 06:46:06] 24 : start with  T18B , npnpid =   7418 ,version :  1
+INFO  [2025-04-18 06:46:07] END step i 
+INFO  [2025-04-18 06:46:07] 25 : start with  T18RF , npnpid =   7722 ,version :  1
+INFO  [2025-04-18 06:46:08] END step i 
+INFO  [2025-04-18 06:46:08] 26 : start with  T18RF , npnpid =   7723 ,version :  1
+INFO  [2025-04-18 06:46:10] END step i 
+INFO  [2025-04-18 06:46:10] 27 : start with  T18RF , npnpid =   7724 ,version :  1
+INFO  [2025-04-18 06:46:11] END step i 
+INFO  [2025-04-18 06:46:11] 28 : start with  T18RF , npnpid =   7742 ,version :  1
+INFO  [2025-04-18 06:46:12] END step i 
+INFO  [2025-04-18 06:46:12] 29 : start with  T18SO , npnpid =   7740 ,version :  1
