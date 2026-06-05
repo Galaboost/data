@@ -1,4 +1,5 @@
 import logging
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -10,148 +11,111 @@ def _read_sql(connection, query: str, label: str) -> pd.DataFrame:
     logger.info("Extract %s", label)
     if hasattr(connection, "connect"):
         with connection.connect() as conn:
-            return pd.read_sql_query(query, conn).drop_duplicates().reset_index(drop=True)
-    return pd.read_sql_query(query, connection).drop_duplicates().reset_index(drop=True)
+            return pd.read_sql_query(query, conn)
+    return pd.read_sql_query(query, connection)
 
 
-def _sql_literals(values) -> str:
-    clean = pd.Series(values).dropna().astype(str).str.strip().drop_duplicates()
-    if clean.empty:
-        return "''"
-    return ", ".join("'" + value.replace("'", "''") + "'" for value in clean)
+def _sql_literal(value) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
 
-def extract_swt_profiles(dmp_engine) -> pd.DataFrame:
-    query = """
-        SELECT profile_name, selected_npnpid, selected_version
-        FROM t_profile_maps_master
-    """
-    df = _read_sql(dmp_engine, query, "SWT profiles from DMP")
-    if df.empty:
-        return pd.DataFrame(columns=["techno", "npnpid", "version"])
-
-    df.columns = [column.lower() for column in df.columns]
-    result = pd.DataFrame(
-        {
-            "techno": df["profile_name"].astype(str).str.extract(r"([A-Za-z0-9]+)", expand=False),
-            "npnpid": df["selected_npnpid"].astype(str).str.strip(),
-            "version": df["selected_version"].astype(str).str.strip(),
-        }
-    )
-    return result.dropna().drop_duplicates().sort_values(["techno", "npnpid", "version"]).reset_index(drop=True)
-
-
-def extract_available_nparams(dbprod_engine, npnpid: str, version: str) -> list[int]:
+def extract_recent_index_refs(dbtrade_connection, lookback_days: int) -> pd.DataFrame:
+    start_date = date.today() - timedelta(days=lookback_days)
     query = f"""
-        SELECT nparam
-        FROM DBPROD.T_TPARAMF
-        WHERE npnpid = '{npnpid}'
-        AND version = '{version}'
+        SELECT NPNPID, VERSION, PROD_CODE
+        FROM ACLFT.T_INDEX
+        WHERE DATE(DTCDRMAJ) >= {_sql_literal(start_date)}
+        AND NB_TR_RECUES > 0
     """
-    df = _read_sql(dbprod_engine, query, f"available NPARAM for {npnpid}/{version}")
-    if df.empty:
-        return []
-    column = "nparam" if "nparam" in df.columns else "NPARAM"
-    return pd.to_numeric(df[column], errors="coerce").dropna().astype(int).drop_duplicates().tolist()
+    return _read_sql(dbtrade_connection, query, "recent DBTRADE T_INDEX references")
 
 
-def extract_lot_data(dbprod_engine, npnpid: str, version: str, nparams, start_date, end_date) -> pd.DataFrame:
-    nparam_sql = _sql_literals(nparams)
-    query_param = f"""
-        SELECT a.nlocfab, a.ddtest, a.npnpid, a.version, a.nparam,
-               a.qvl50pc AS value, substr(t.tparam, 1, 35) AS tparam
-        FROM DBPROD.T_TLOTPARF AS a
-        INNER JOIN DBPROD.T_TPARAMF AS t
-            ON a.npnpid = t.npnpid
-            AND a.version = t.version
-            AND a.nparam = t.nparam
-        WHERE a.npnpid = '{npnpid}'
-        AND a.version = '{version}'
-        AND a.nparam IN ({nparam_sql})
-        AND a.NLOCFAB IN (
-            SELECT NLOCFAB
-            FROM DBPROD.T_TLOTPNPF
-            WHERE npnpid = '{npnpid}'
-            AND version = '{version}'
-            AND ddtest >= '{start_date}'
-            AND ddtest <= '{end_date}'
-        )
+def extract_histo_master_refs(dbtrade_connection) -> pd.DataFrame:
+    query = """
+        SELECT QUERY
+        FROM ACLFTR.T_HISTO
+        WHERE TABLE='ACLFTR.T_MASTER'
     """
-    query_yield = f"""
-        SELECT a.nlocfab, a.ddtest, a.npnpid, a.version, a.nparam,
-               a.qyield AS value, substr(t.tparam, 1, 35) AS tparam
-        FROM DBPROD.T_TLOTYLDF AS a
-        INNER JOIN DBPROD.T_TPARAMF AS t
-            ON a.npnpid = t.npnpid
-            AND a.version = t.version
-            AND a.nparam = t.nparam
-        WHERE a.npnpid = '{npnpid}'
-        AND a.version = '{version}'
-        AND a.nparam IN ({nparam_sql})
-        AND a.NLOCFAB IN (
-            SELECT NLOCFAB
-            FROM DBPROD.T_TLOTPNPF
-            WHERE npnpid = '{npnpid}'
-            AND version = '{version}'
-            AND ddtest >= '{start_date}'
-            AND ddtest <= '{end_date}'
-        )
-    """
-    return pd.concat(
-        [
-            _read_sql(dbprod_engine, query_param, f"lot param data {npnpid}/{version}"),
-            _read_sql(dbprod_engine, query_yield, f"lot yield data {npnpid}/{version}"),
-        ],
-        ignore_index=True,
-    )
+    return _read_sql(dbtrade_connection, query, "ACLFTR.T_HISTO master references")
 
 
-def extract_wafer_data(dbprod_engine, npnpid: str, version: str, nparams, start_date, end_date) -> pd.DataFrame:
-    nparam_sql = _sql_literals(nparams)
-    query_param = f"""
-        SELECT a.nlocfab, a.ntranch, a.ddtest, a.npnpid, a.version, a.nparam,
-               a.qvl50pc AS value, substr(t.tparam, 1, 35) AS tparam
-        FROM DBPROD.T_TTRCPARF AS a
-        INNER JOIN DBPROD.T_TPARAMF AS t
-            ON a.npnpid = t.npnpid
-            AND a.version = t.version
-            AND a.nparam = t.nparam
-        WHERE a.npnpid = '{npnpid}'
-        AND a.version = '{version}'
-        AND a.nparam IN ({nparam_sql})
-        AND a.NLOCFAB IN (
-            SELECT NLOCFAB
-            FROM DBPROD.T_TLOTPNPF
-            WHERE npnpid = '{npnpid}'
-            AND version = '{version}'
-            AND ddtest >= '{start_date}'
-            AND ddtest <= '{end_date}'
-        )
+def extract_ref_master(dmp_engine) -> pd.DataFrame:
+    query = "SELECT * FROM t_swt_ref_master"
+    return _read_sql(dmp_engine, query, "DMP t_swt_ref_master")
+
+
+def extract_max_ref_param_id(dmp_engine, database: str) -> int:
+    query = f"SELECT MAX(ref_param_id) AS max_id FROM {database}.t_swt_ref_param"
+    df = _read_sql(dmp_engine, query, "max t_swt_ref_param.ref_param_id")
+    if df.empty or pd.isna(df.loc[0, "max_id"]):
+        return 0
+    return int(df.loc[0, "max_id"])
+
+
+def extract_ref_params(dmp_engine, database: str, swt_ref_id: int) -> pd.DataFrame:
+    query = f"""
+        SELECT ref_param_id, swt_ref_id, parameter_id, yield_test
+        FROM {database}.t_swt_ref_param
+        WHERE swt_ref_id = {int(swt_ref_id)}
     """
-    query_yield = f"""
-        SELECT a.nlocfab, a.ntranch, a.ddtest, a.npnpid, a.version, a.nparam,
-               a.qyield AS value, substr(t.tparam, 1, 35) AS tparam
-        FROM DBPROD.T_TTRCYLDF AS a
-        INNER JOIN DBPROD.T_TPARAMF AS t
-            ON a.npnpid = t.npnpid
-            AND a.version = t.version
-            AND a.nparam = t.nparam
-        WHERE a.npnpid = '{npnpid}'
-        AND a.version = '{version}'
-        AND a.nparam IN ({nparam_sql})
-        AND a.NLOCFAB IN (
-            SELECT NLOCFAB
-            FROM DBPROD.T_TLOTPNPF
-            WHERE npnpid = '{npnpid}'
-            AND version = '{version}'
-            AND ddtest >= '{start_date}'
-            AND ddtest <= '{end_date}'
-        )
+    return _read_sql(dmp_engine, query, f"DMP reference parameters for swt_ref_id={swt_ref_id}")
+
+
+def extract_yield_parameters(dbtrade_connection, npnp_id: int, version: int, product_code: str) -> pd.DataFrame:
+    query = f"""
+        SELECT NPARAM AS parameter_id,
+               DESC_PARAM AS parameter_name,
+               NPNPID,
+               VERSION
+        FROM ACLFTR.T_YIELD
+        WHERE NPNPID IN ({_sql_literal(npnp_id)})
+        AND VERSION IN ({_sql_literal(version)})
+        AND PROD_CODE IN ({_sql_literal(product_code)})
     """
-    return pd.concat(
-        [
-            _read_sql(dbprod_engine, query_param, f"wafer param data {npnpid}/{version}"),
-            _read_sql(dbprod_engine, query_yield, f"wafer yield data {npnpid}/{version}"),
-        ],
-        ignore_index=True,
-    )
+    return _read_sql(dbtrade_connection, query, f"yield parameters {npnp_id}/{version}/{product_code}")
+
+
+def extract_analog_parameters(dbtrade_connection, npnp_id: int, version: int, product_code: str) -> pd.DataFrame:
+    query = f"""
+        SELECT NPARAM AS parameter_id,
+               DESC_PARAM AS parameter_name,
+               NPNPID,
+               VERSION
+        FROM ACLFTR.T_PARAM
+        WHERE NPNPID IN ({_sql_literal(npnp_id)})
+        AND VERSION IN ({_sql_literal(version)})
+        AND PROD_CODE IN ({_sql_literal(product_code)})
+    """
+    return _read_sql(dbtrade_connection, query, f"analog parameters {npnp_id}/{version}/{product_code}")
+
+
+def extract_yield_limits(dbtrade_connection, npnp_id: int, version: int, product_code: str) -> pd.DataFrame:
+    query = f"""
+        SELECT NPARAM AS parameter_id,
+               YIELD_TYPE,
+               CAL_REGION,
+               CONDITION
+        FROM ACLFTR.T_YIELD
+        WHERE NPNPID IN ({_sql_literal(npnp_id)})
+        AND VERSION IN ({_sql_literal(version)})
+        AND PROD_CODE IN ({_sql_literal(product_code)})
+    """
+    return _read_sql(dbtrade_connection, query, f"yield limits {npnp_id}/{version}/{product_code}")
+
+
+def extract_analog_limits(dbtrade_connection, npnp_id: int, version: int, product_code: str) -> pd.DataFrame:
+    query = f"""
+        SELECT NPARAM AS parameter_id,
+               NUNIT AS unit,
+               QTL AS lsl,
+               QTH AS usl,
+               QDL AS low_control_limit,
+               QDH AS high_control_limit,
+               QCL AS low_cens_limit,
+               QCH AS high_cens_limit
+        FROM ACLFTR.T_PARAM
+        WHERE NPNPID IN ({_sql_literal(npnp_id)})
+        AND VERSION IN ({_sql_literal(version)})
+        AND PROD_CODE IN ({_sql_literal(product_code)})
+    """
+    return _read_sql(dbtrade_connection, query, f"analog limits {npnp_id}/{version}/{product_code}")
