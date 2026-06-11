@@ -6,28 +6,28 @@ import pandas as pd
 REF_KEY_COLUMNS = ["npnp_id", "version", "product_code"]
 
 
-def _lower_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _lower_columns(df):
     result = df.copy()
     result.columns = [column.lower() for column in result.columns]
     return result
 
 
-def _compact_product_code(series: pd.Series) -> pd.Series:
+def _compact_product_code(series):
     return series.astype(str).str.replace(" ", "", regex=False).str.strip()
 
 
-def _to_int(series: pd.Series) -> pd.Series:
+def _to_int(series):
     return pd.to_numeric(series, errors="coerce").astype("Int64")
 
 
-def _one_year_ago(value: datetime) -> datetime:
+def _one_year_ago(value):
     try:
         return value.replace(year=value.year - 1)
     except ValueError:
         return value.replace(year=value.year - 1, day=28)
 
 
-def transform_index_refs(df_index: pd.DataFrame) -> pd.DataFrame:
+def transform_index_refs(df_index):
     if df_index.empty:
         return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
 
@@ -42,7 +42,7 @@ def transform_index_refs(df_index: pd.DataFrame) -> pd.DataFrame:
     return df.dropna(subset=["npnp_id", "version"]).drop_duplicates().sort_values(REF_KEY_COLUMNS).reset_index(drop=True)
 
 
-def transform_histo_refs(df_histo: pd.DataFrame) -> pd.DataFrame:
+def transform_histo_refs(df_histo):
     if df_histo.empty:
         return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
 
@@ -71,7 +71,7 @@ def transform_histo_refs(df_histo: pd.DataFrame) -> pd.DataFrame:
     return result.dropna(subset=["npnp_id", "version"]).drop_duplicates().sort_values(REF_KEY_COLUMNS).reset_index(drop=True)
 
 
-def combine_detected_refs(index_refs: pd.DataFrame, histo_refs: pd.DataFrame) -> pd.DataFrame:
+def combine_detected_refs(index_refs, histo_refs):
     result = pd.concat([histo_refs, index_refs], ignore_index=True, sort=False)
     if result.empty:
         return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
@@ -80,7 +80,7 @@ def combine_detected_refs(index_refs: pd.DataFrame, histo_refs: pd.DataFrame) ->
     return result.drop_duplicates().sort_values(REF_KEY_COLUMNS).reset_index(drop=True)
 
 
-def find_new_refs(detected_refs: pd.DataFrame, ref_master: pd.DataFrame) -> pd.DataFrame:
+def find_new_refs(detected_refs, ref_master):
     if detected_refs.empty:
         return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
     if ref_master.empty:
@@ -102,7 +102,7 @@ def find_new_refs(detected_refs: pd.DataFrame, ref_master: pd.DataFrame) -> pd.D
     )
 
 
-def max_swt_ref_id(ref_master: pd.DataFrame) -> int:
+def max_swt_ref_id(ref_master):
     if ref_master.empty:
         return 0
     master = _lower_columns(ref_master)
@@ -112,7 +112,7 @@ def max_swt_ref_id(ref_master: pd.DataFrame) -> int:
     return int(values.max()) if not values.empty else 0
 
 
-def build_ref_master_row(ref_row, swt_ref_id: int, now_value: datetime | None = None) -> pd.DataFrame:
+def build_ref_master_row(ref_row, swt_ref_id, now_value=None):
     now_value = now_value or datetime.now()
     npnp_id = int(ref_row.npnp_id)
     version = int(ref_row.version)
@@ -132,12 +132,7 @@ def build_ref_master_row(ref_row, swt_ref_id: int, now_value: datetime | None = 
     )
 
 
-def build_ref_param_rows(
-    yield_params: pd.DataFrame,
-    analog_params: pd.DataFrame,
-    swt_ref_id: int,
-    last_ref_param_id: int,
-) -> pd.DataFrame:
+def build_ref_param_rows(yield_params, analog_params, swt_ref_id, last_ref_param_id):
     yield_df = _lower_columns(yield_params)
     analog_df = _lower_columns(analog_params)
     yield_df["yield_test"] = 1
@@ -155,7 +150,7 @@ def build_ref_param_rows(
     return df[["ref_param_id", "swt_ref_id", "parameter_id", "parameter_name", "yield_test"]]
 
 
-def build_yield_rows(ref_params: pd.DataFrame, yield_limits: pd.DataFrame) -> pd.DataFrame:
+def build_yield_rows(ref_params, yield_limits):
     ref_df = _lower_columns(ref_params)
     limits = _lower_columns(yield_limits)
     if ref_df.empty or limits.empty:
@@ -164,7 +159,7 @@ def build_yield_rows(ref_params: pd.DataFrame, yield_limits: pd.DataFrame) -> pd
     return merged.sort_values("ref_param_id")[["ref_param_id", "yield_type", "cal_region", "condition"]]
 
 
-def build_analog_rows(ref_params: pd.DataFrame, analog_limits: pd.DataFrame) -> pd.DataFrame:
+def build_analog_rows(ref_params, analog_limits):
     ref_df = _lower_columns(ref_params)
     limits = _lower_columns(analog_limits)
     columns = [
@@ -181,3 +176,40 @@ def build_analog_rows(ref_params: pd.DataFrame, analog_limits: pd.DataFrame) -> 
         return pd.DataFrame(columns=columns)
     merged = ref_df.merge(limits, on="parameter_id", how="inner")
     return merged.sort_values("ref_param_id")[columns]
+
+
+def build_new_references(data):
+    index_refs = transform_index_refs(data["index_refs"])
+    histo_refs = transform_histo_refs(data["histo_refs"])
+    detected_refs = combine_detected_refs(index_refs, histo_refs)
+    return find_new_refs(detected_refs, data["ref_master"])
+
+
+def add_swt_ref_ids(new_refs, ref_master):
+    if new_refs.empty:
+        return new_refs.copy()
+
+    df = new_refs.copy().reset_index(drop=True)
+    first_ref_id = max_swt_ref_id(ref_master) + 1
+    df["swt_ref_id"] = range(first_ref_id, first_ref_id + len(df))
+    return df
+
+
+def build_reference_payload(reference, parameter_data):
+    swt_ref_id = int(reference.swt_ref_id)
+    ref_master_row = build_ref_master_row(reference, swt_ref_id)
+    ref_param_rows = build_ref_param_rows(
+        parameter_data["yield_params"],
+        parameter_data["analog_params"],
+        swt_ref_id,
+        parameter_data["last_param_id"],
+    )
+    yield_rows = build_yield_rows(parameter_data["ref_params"], parameter_data["yield_limits"])
+    analog_rows = build_analog_rows(parameter_data["ref_params"], parameter_data["analog_limits"])
+
+    return {
+        "ref_master": ref_master_row,
+        "ref_param": ref_param_rows,
+        "ref_yield": yield_rows,
+        "ref_analog": analog_rows,
+    }

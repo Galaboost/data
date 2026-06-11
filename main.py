@@ -4,134 +4,78 @@ import time
 from pathlib import Path
 
 from config import connect_to_dbtrade, connect_to_dmp
-from extract import (
-    extract_analog_limits,
-    extract_analog_parameters,
-    extract_histo_master_refs,
-    extract_max_ref_param_id,
-    extract_recent_index_refs,
-    extract_ref_master,
-    extract_ref_params,
-    extract_yield_limits,
-    extract_yield_parameters,
-)
-from load import load_ref_analog, load_ref_master, load_ref_param, load_ref_yield
-from transform import (
-    build_analog_rows,
-    build_ref_master_row,
-    build_ref_param_rows,
-    build_yield_rows,
-    combine_detected_refs,
-    find_new_refs,
-    max_swt_ref_id,
-    transform_histo_refs,
-    transform_index_refs,
-)
+from extract import extract_detected_reference_data, extract_reference_parameters
+from load import load_reference_payload
+from transform import add_swt_ref_ids, build_new_references, build_reference_payload
 
 
-VERSION = "v.2.7-python"
-start = time.perf_counter()
-project_dir = Path(__file__).resolve().parent
-log_dir = Path(os.environ.get("LOG_DIR", project_dir / "logs"))
-log_dir.mkdir(parents=True, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format="%(asctime)s | %(message)s",
     handlers=[
         logging.FileHandler(
-            log_dir / "DBTRADEref_to_datamart_swt_ref.py.log",
+            LOG_DIR / "DBTRADEref_to_datamart_swt_ref.log",
             mode="w",
-            encoding="utf-8",
+            encoding="utf-8"
         ),
-        logging.StreamHandler(),
-    ],
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-dmp_database = os.environ.get("DMP_DATABASE", "dmp")
-lookback_days = int(os.environ.get("DBTRADE_LOOKBACK_DAYS", "20"))
-dbtrade_connection = None
-dmp_engine = None
 
-try:
-    logger.info("dm_t_swt_ref_new.py %s - new search of reference to load", VERSION)
-    dbtrade_connection = connect_to_dbtrade()
-    dmp_engine = connect_to_dmp()
+def run_etl():
+    start_time = time.perf_counter()
 
-    index_refs = transform_index_refs(
-        extract_recent_index_refs(dbtrade_connection, lookback_days)
-    )
-    histo_refs = transform_histo_refs(extract_histo_master_refs(dbtrade_connection))
-    detected_refs = combine_detected_refs(index_refs, histo_refs)
+    try:
+        dbtrade_connection = connect_to_dbtrade()
+        dmp_engine = connect_to_dmp()
+        dmp_database = os.environ.get("DMP_DATABASE", "dmp")
+        lookback_days = int(os.environ.get("DBTRADE_LOOKBACK_DAYS", "20"))
 
-    ref_master = extract_ref_master(dmp_engine)
-    new_refs = find_new_refs(detected_refs, ref_master)
-    logger.info("Detection of new ref: %s", len(new_refs))
+        t0 = time.perf_counter()
+        source_data = extract_detected_reference_data(
+            dbtrade_connection,
+            dmp_engine,
+            lookback_days
+        )
+        logger.info(f"Extract done in {time.perf_counter() - t0:.2f} sec")
 
-    if not new_refs.empty:
-        logger.info("<<<<---- start of reference update ----")
-        last_ref_id = max_swt_ref_id(ref_master)
+        t0 = time.perf_counter()
+        new_references = build_new_references(source_data)
+        new_references = add_swt_ref_ids(new_references, source_data["ref_master"])
+        logger.info(f"Transform done in {time.perf_counter() - t0:.2f} sec")
+        logger.info(f"{len(new_references)} reference(s) to insert")
 
-        for k, ref_row in enumerate(new_refs.itertuples(index=False), start=1):
-            swt_ref_id = last_ref_id + k
-            npnp_id = int(ref_row.npnp_id)
-            version = int(ref_row.version)
-            product_code = str(ref_row.product_code)
-
-            logger.info(
-                "%s, npnp_id:%s - version:%s - product_code:%s",
-                k,
-                npnp_id,
-                version,
-                product_code,
+        t0 = time.perf_counter()
+        for reference in new_references.itertuples(index=False):
+            parameter_data = extract_reference_parameters(
+                dbtrade_connection,
+                dmp_engine,
+                dmp_database,
+                reference
             )
+            payload = build_reference_payload(reference, parameter_data)
+            load_reference_payload(payload, dmp_engine)
 
-            ref_master_row = build_ref_master_row(ref_row, swt_ref_id)
-            load_ref_master(dmp_engine, ref_master_row)
-            logger.info("--End update dmp t_swt_ref_master >>")
+        logger.info(f"Load done in {time.perf_counter() - t0:.2f} sec")
+        logger.info(f"End ETL in {time.perf_counter() - start_time:.2f} sec")
 
-            last_param_id = extract_max_ref_param_id(dmp_engine, dmp_database)
-            yield_params = extract_yield_parameters(
-                dbtrade_connection, npnp_id, version, product_code
-            )
-            analog_params = extract_analog_parameters(
-                dbtrade_connection, npnp_id, version, product_code
-            )
-            ref_param_rows = build_ref_param_rows(
-                yield_params,
-                analog_params,
-                swt_ref_id,
-                last_param_id,
-            )
-            load_ref_param(dmp_engine, ref_param_rows)
-            logger.info("--End update dmp t_swt_ref_param >>")
+        return new_references
 
-            ref_params = extract_ref_params(dmp_engine, dmp_database, swt_ref_id)
+    except Exception:
+        logger.exception("Fatal error")
+        raise
+    finally:
+        if "dbtrade_connection" in locals():
+            dbtrade_connection.close()
+        if "dmp_engine" in locals():
+            dmp_engine.dispose()
 
-            yield_limits = extract_yield_limits(
-                dbtrade_connection, npnp_id, version, product_code
-            )
-            yield_rows = build_yield_rows(ref_params, yield_limits)
-            load_ref_yield(dmp_engine, yield_rows)
-            logger.info("--End update dmp t_swt_ref_yield >>")
 
-            analog_limits = extract_analog_limits(
-                dbtrade_connection, npnp_id, version, product_code
-            )
-            analog_rows = build_analog_rows(ref_params, analog_limits)
-            load_ref_analog(dmp_engine, analog_rows)
-            logger.info("--End update dmp t_swt_ref_analog >>")
-
-        logger.info("---- End of reference update ---->>>>")
-
-    logger.info("RETURNCODE=0")
-    logger.info("END script in %.2f sec", time.perf_counter() - start)
-except Exception:
-    logger.exception("RETURNCODE=2")
-    raise
-finally:
-    if dbtrade_connection is not None:
-        dbtrade_connection.close()
-    if dmp_engine is not None:
-        dmp_engine.dispose()
+if __name__ == "__main__":
+    run_etl()
