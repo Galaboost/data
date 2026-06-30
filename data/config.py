@@ -1,32 +1,27 @@
 import os
-
+from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
-
 
 load_dotenv()
 
-def connect_to_symaro_db():
-    user = os.environ["SYMARO_USER"]
-    password = os.environ["SYMARO_PASSWORD"]
-    host = os.environ.get("SYMARO_HOST", "localhost")
-    port = os.environ.get("SYMARO_PORT", "3306")
-    database = os.environ.get("SYMARO_DATABASE", "symaro")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
 
-    return create_engine(
-        f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}",
-        pool_pre_ping=True
-    )
+DATABASE_URL = (
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+    f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+)
 
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=3600
+)
 
-def connect_to_datamart_db():
-    user = os.environ.get("DATAMART_USER", "appdatamart")
-    password = os.environ["DATAMART_PASSWORD"]
-    host = os.environ.get("DATAMART_HOST", "maxscale")
-    port = os.environ.get("DATAMART_PORT", "4306")
-    database = os.environ.get("DATAMART_DATABASE", "dmp")
-
-    return create_engine(
-        f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}",
-        pool_pre_ping=True
-    )
+def fetch_all(query: str, params: dict = None):
+    with engine.connect() as connection:
+        result = connection.execute(text(query), params or {})
+        return [dict(row._mapping) for row in result]
