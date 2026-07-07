@@ -1,215 +1,450 @@
-from datetime import datetime
-
 import pandas as pd
 
-
-REF_KEY_COLUMNS = ["npnp_id", "version", "product_code"]
-
-
-def _lower_columns(df):
-    result = df.copy()
-    result.columns = [column.lower() for column in result.columns]
-    return result
+from config import (
+    DIE_COLUMNS,
+    EMAP_COLUMNS,
+    MASKSET_ALIASES,
+    RET_COLUMNS,
+)
 
 
-def _compact_product_code(series):
-    return series.astype(str).str.replace(" ", "", regex=False).str.strip()
+EMAP_KEYS = {
+    "SAPN__",
+    "DESIGN",
+    "XFRAME",
+    "YFRAME",
+    "SHOTSX",
+    "SHOTSY",
+    "COLALL",
+    "ROWALL",
+    "CXSIZE",
+    "CYSIZE",
+    "REFMTX",
+    "REFMTY",
+}
+
+RET_MAP_KEYS = {f"MAP{i:03d}" for i in range(1, 100)}
+DIE_MAP_KEYS = {f"MAP{i:03d}" for i in range(1, 1000)}
 
 
-def _to_int(series):
-    return pd.to_numeric(series, errors="coerce").astype("Int64")
+def _first_existing(df, *names):
+    for name in names:
+        if name in df.columns:
+            return name
+    raise KeyError(f"Missing expected column among {names}")
 
 
-def _one_year_ago(value):
-    try:
-        return value.replace(year=value.year - 1)
-    except ValueError:
-        return value.replace(year=value.year - 1, day=28)
+def _trim_numeric(value, kind="float"):
+    if pd.isna(value):
+        return pd.NA
+    value = str(value)[:9]
+    parsed = pd.to_numeric(value, errors="coerce")
+    if pd.isna(parsed):
+        return pd.NA
+    if kind == "int":
+        return int(parsed)
+    return float(parsed)
 
 
-def transform_index_refs(df_index):
-    if df_index.empty:
-        return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
-
-    df = _lower_columns(df_index).rename(
-        columns={"npnpid": "npnp_id", "prod_code": "product_code"}
-    )
-    df = df[["npnp_id", "version", "product_code"]].drop_duplicates()
-    df["npnp_id"] = _to_int(df["npnp_id"])
-    df["version"] = _to_int(df["version"])
-    df["product_code"] = _compact_product_code(df["product_code"])
-    df["cprod"] = df["product_code"]
-    return df.dropna(subset=["npnp_id", "version"]).drop_duplicates().sort_values(REF_KEY_COLUMNS).reset_index(drop=True)
+def _to_numeric(series, kind="float"):
+    return series.map(lambda value: _trim_numeric(value, kind=kind))
 
 
-def transform_histo_refs(df_histo):
-    if df_histo.empty:
-        return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
+def _map_number(name, prefix_len=3):
+    return int(str(name)[prefix_len:7])
 
-    df = _lower_columns(df_histo)
+
+def prepare_devices(df_devices, limit):
+    if df_devices.empty:
+        return df_devices.copy()
+
+    df = df_devices.iloc[::-1].reset_index(drop=True)
+    if "customer_name" in df.columns:
+        df = df[df["customer_name"] != "ALEDIA"]
+    if "process_family" in df.columns:
+        df = df[df["process_family"] != "SL011"]
+    return df.head(limit).reset_index(drop=True)
+
+
+def normalize_maskset(maskset_name):
+    return MASKSET_ALIASES.get(str(maskset_name), str(maskset_name))
+
+
+def parse_map0_file(map0_file):
     rows = []
-    for raw_query in df["query"].dropna().astype(str):
-        parts = raw_query.split(",", 2)
-        if len(parts) < 3:
+    for raw_line in str(map0_file or "").splitlines():
+        parts = raw_line.split()
+        if not parts:
             continue
-        rows.append(
-            {
-                "npnp_id": parts[0].strip()[-4:],
-                "version": parts[1].strip(),
-                "product_code": parts[2].replace(",", "").strip(),
-            }
-        )
-
-    result = pd.DataFrame(rows, columns=REF_KEY_COLUMNS)
-    if result.empty:
-        return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
-
-    result["npnp_id"] = _to_int(result["npnp_id"])
-    result["version"] = _to_int(result["version"])
-    result["product_code"] = _compact_product_code(result["product_code"])
-    result["cprod"] = result["product_code"]
-    return result.dropna(subset=["npnp_id", "version"]).drop_duplicates().sort_values(REF_KEY_COLUMNS).reset_index(drop=True)
+        row = {"variable": parts[0], "value": parts[1] if len(parts) > 1 else pd.NA}
+        for index, part in enumerate(parts[:14], start=1):
+            row[f"V{index}"] = part
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
-def combine_detected_refs(index_refs, histo_refs):
-    result = pd.concat([histo_refs, index_refs], ignore_index=True, sort=False)
-    if result.empty:
-        return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
-    result["product_code"] = _compact_product_code(result["product_code"])
-    result["cprod"] = result["product_code"]
-    return result.drop_duplicates().sort_values(REF_KEY_COLUMNS).reset_index(drop=True)
+def _pivot_records(df_lines, keys, start_key):
+    filtered = df_lines[df_lines["variable"].isin(keys)][["variable", "value"]].copy()
+    if filtered.empty:
+        return pd.DataFrame()
 
-
-def find_new_refs(detected_refs, ref_master):
-    if detected_refs.empty:
-        return pd.DataFrame(columns=REF_KEY_COLUMNS + ["cprod"])
-    if ref_master.empty:
-        return detected_refs.sort_values(REF_KEY_COLUMNS).reset_index(drop=True)
-
-    master = _lower_columns(ref_master)
-    master = master.rename(columns={"npnpid": "npnp_id", "prod_code": "product_code"})
-    master = master[[column for column in REF_KEY_COLUMNS if column in master.columns]].drop_duplicates()
-    master["npnp_id"] = _to_int(master["npnp_id"])
-    master["version"] = _to_int(master["version"])
-    master["product_code"] = _compact_product_code(master["product_code"])
-
-    merged = detected_refs.merge(master.assign(_already_loaded=True), on=REF_KEY_COLUMNS, how="left")
+    ids = []
+    current_id = 0
+    for variable in filtered["variable"]:
+        if not ids or variable == start_key:
+            current_id += 1
+        ids.append(current_id)
+    filtered["Id"] = ids
     return (
-        merged[merged["_already_loaded"].isna()]
-        .drop(columns=["_already_loaded"])
-        .sort_values(REF_KEY_COLUMNS)
-        .reset_index(drop=True)
+        filtered.pivot_table(
+            index="Id",
+            columns="variable",
+            values="value",
+            aggfunc="first",
+            dropna=False,
+        )
+        .reset_index()
+        .rename_axis(None, axis=1)
     )
 
 
-def max_swt_ref_id(ref_master):
-    if ref_master.empty:
-        return 0
-    master = _lower_columns(ref_master)
-    if "swt_ref_id" not in master.columns:
-        return 0
-    values = pd.to_numeric(master["swt_ref_id"], errors="coerce").dropna()
-    return int(values.max()) if not values.empty else 0
+def build_emap_ascii(map_lines, device_row):
+    df = _pivot_records(map_lines, EMAP_KEYS, "SAPN__")
+    if df.empty:
+        return pd.DataFrame(columns=EMAP_COLUMNS)
+
+    if {"SHOTSX", "SHOTSY"}.issubset(df.columns):
+        df = df[
+            (pd.to_numeric(df["SHOTSX"], errors="coerce") > 1)
+            & (pd.to_numeric(df["SHOTSY"], errors="coerce") > 1)
+        ]
+    df = df.drop_duplicates()
+    df["ret_x_max"] = df["SHOTSX"]
+    df["ret_y_max"] = df["SHOTSY"]
+
+    df = df.rename(
+        columns={
+            "COLALL": "die_x_max",
+            "ROWALL": "die_y_max",
+            "XFRAME": "ret_x_size",
+            "YFRAME": "ret_y_size",
+            "CXSIZE": "die_x_size",
+            "CYSIZE": "die_y_size",
+            "DESIGN": "maskset_name",
+            "REFMTX": "swt_die_x_offset",
+            "REFMTY": "swt_die_y_offset",
+            "SAPN__": "sapn",
+        }
+    )
+
+    for column in ["ret_x_size", "ret_y_size", "die_x_size", "die_y_size"]:
+        df[column] = _to_numeric(df[column])
+    for column in ["die_x_max", "die_y_max", "ret_x_max", "ret_y_max"]:
+        df[column] = _to_numeric(df[column], kind="int")
+
+    df["ret_y_vs_x_ratio"] = df["ret_y_size"] / df["ret_x_size"]
+    df["die_y_vs_x_ratio"] = df["die_y_size"] / df["die_x_size"]
+    df["swt_die_x_offset"] = _to_numeric(df["swt_die_x_offset"], kind="int") - 1
+    df["swt_die_y_offset"] = _to_numeric(df["swt_die_y_offset"], kind="int") - 1
+
+    device = pd.DataFrame([device_row.to_dict()])
+    merged = df.merge(device, on="maskset_name", how="right")
+    drop_columns = [
+        "Id",
+        "process_family",
+        "local_process_family",
+        "customer_proj_name",
+        "customer_id",
+        "global_process_id",
+        "customer_name",
+        "module_list",
+        "device_type",
+        "emap_id",
+    ]
+    merged = merged.drop(columns=[column for column in drop_columns if column in merged.columns])
+    merged = merged.drop_duplicates()
+    merged["filename"] = "Unknown"
+    return merged
 
 
-def build_ref_master_row(ref_row, swt_ref_id, now_value=None):
-    now_value = now_value or datetime.now()
-    npnp_id = int(ref_row.npnp_id)
-    version = int(ref_row.version)
-    product_code = str(ref_row.product_code)
-    return pd.DataFrame(
-        [
-            {
-                "swt_ref_id": swt_ref_id,
-                "npnp_id": npnp_id,
-                "version": version,
-                "product_code": product_code,
-                "swt_ref_fra_datetime": _one_year_ago(now_value),
-                "load_file_name": "ACLFTR_sql",
-                "comment": f"File-{npnp_id}-{version}-{product_code}- manual load with dm_t_swt_ref.R",
-            }
+def build_emap_total(emap_ascii, map0_info):
+    if emap_ascii.empty:
+        return pd.DataFrame(columns=EMAP_COLUMNS)
+
+    info = map0_info.copy()
+    merged = emap_ascii.merge(
+        info,
+        left_on=["sapn", "maskset_name"],
+        right_on=["SAPN", "DESIGN"],
+        how="left",
+    )
+    merged = merged.drop(
+        columns=[
+            column
+            for column in ["SAPN", "DESIGN", "MAP_TYPE", "COLCNT", "ROWCNT", "XDIES", "YDIES", "COMMENT", "MAJ_DATE"]
+            if column in merged.columns
         ]
     )
+    merged = merged.rename(
+        columns={
+            "VERSION": "version",
+            "CHIP_COUNT": "die_qty",
+            "DT_EFFET": "effective_fra_datetime",
+        }
+    )
+    merged["filename"] = (
+        merged["device_id"].astype(str)
+        + "_"
+        + merged["sapn"].astype(str)
+        + "_"
+        + merged["maskset_name"].astype(str)
+        + "_"
+        + merged["version"].astype(str)
+    )
+    merged = merged[merged["sapn"].notna()]
+    return merged.reindex(columns=EMAP_COLUMNS)
 
 
-def build_ref_param_rows(yield_params, analog_params, swt_ref_id, last_ref_param_id):
-    yield_df = _lower_columns(yield_params)
-    analog_df = _lower_columns(analog_params)
-    yield_df["yield_test"] = 1
-    analog_df["yield_test"] = 0
-    df = pd.concat([yield_df, analog_df], ignore_index=True, sort=False)
+def _map_rows(map_lines, keys, start_key="DESIGN", unique=True, filter_shots=False):
+    df = _pivot_records(map_lines, keys, start_key)
     if df.empty:
-        return pd.DataFrame(columns=["ref_param_id", "swt_ref_id", "parameter_id", "parameter_name", "yield_test"])
-
-    df = df.drop(columns=[column for column in ["npnpid", "version"] if column in df.columns])
-    df["parameter_id"] = pd.to_numeric(df["parameter_id"], errors="coerce")
-    df = df.dropna(subset=["parameter_id"]).sort_values("parameter_id").reset_index(drop=True)
-    df["parameter_id"] = df["parameter_id"].astype(int)
-    df["swt_ref_id"] = int(swt_ref_id)
-    df["ref_param_id"] = range(int(last_ref_param_id) + 1, int(last_ref_param_id) + len(df) + 1)
-    return df[["ref_param_id", "swt_ref_id", "parameter_id", "parameter_name", "yield_test"]]
-
-
-def build_yield_rows(ref_params, yield_limits):
-    ref_df = _lower_columns(ref_params)
-    limits = _lower_columns(yield_limits)
-    if ref_df.empty or limits.empty:
-        return pd.DataFrame(columns=["ref_param_id", "yield_type", "cal_region", "condition"])
-    merged = ref_df.merge(limits, on="parameter_id", how="inner")
-    return merged.sort_values("ref_param_id")[["ref_param_id", "yield_type", "cal_region", "condition"]]
-
-
-def build_analog_rows(ref_params, analog_limits):
-    ref_df = _lower_columns(ref_params)
-    limits = _lower_columns(analog_limits)
-    columns = [
-        "ref_param_id",
-        "unit",
-        "lsl",
-        "usl",
-        "low_control_limit",
-        "high_control_limit",
-        "low_cens_limit",
-        "high_cens_limit",
-    ]
-    if ref_df.empty or limits.empty:
-        return pd.DataFrame(columns=columns)
-    merged = ref_df.merge(limits, on="parameter_id", how="inner")
-    return merged.sort_values("ref_param_id")[columns]
-
-
-def build_new_references(data):
-    index_refs = transform_index_refs(data["index_refs"])
-    histo_refs = transform_histo_refs(data["histo_refs"])
-    detected_refs = combine_detected_refs(index_refs, histo_refs)
-    return find_new_refs(detected_refs, data["ref_master"])
-
-
-def add_swt_ref_ids(new_refs, ref_master):
-    if new_refs.empty:
-        return new_refs.copy()
-
-    df = new_refs.copy().reset_index(drop=True)
-    first_ref_id = max_swt_ref_id(ref_master) + 1
-    df["swt_ref_id"] = range(first_ref_id, first_ref_id + len(df))
+        return df
+    if filter_shots and {"SHOTSX", "SHOTSY"}.issubset(df.columns):
+        df = df[
+            (pd.to_numeric(df["SHOTSX"], errors="coerce") > 1)
+            & (pd.to_numeric(df["SHOTSY"], errors="coerce") > 1)
+        ]
+    if unique:
+        df = df.drop_duplicates()
     return df
 
 
-def build_reference_payload(reference, parameter_data):
-    swt_ref_id = int(reference.swt_ref_id)
-    ref_master_row = build_ref_master_row(reference, swt_ref_id)
-    ref_param_rows = build_ref_param_rows(
-        parameter_data["yield_params"],
-        parameter_data["analog_params"],
-        swt_ref_id,
-        parameter_data["last_param_id"],
+def build_ret_emap(map_lines, emap_total):
+    keys = {"DESIGN", "YFRAME", "XFRAME", "SHOTSY", "SHOTSX"} | RET_MAP_KEYS
+    id_cols = ["Id", "DESIGN", "SHOTSX", "SHOTSY", "XFRAME", "YFRAME"]
+    merge_left = ["DESIGN", "SHOTSX", "SHOTSY", "ret_x_size", "ret_y_size", "ret_y_vs_x_ratio"]
+    merge_right = ["maskset_name", "ret_x_max", "ret_y_max", "ret_x_size", "ret_y_size", "ret_y_vs_x_ratio"]
+    df_input = _map_rows(
+        map_lines,
+        keys,
+        unique=True,
+        filter_shots=True,
     )
-    yield_rows = build_yield_rows(parameter_data["ref_params"], parameter_data["yield_limits"])
-    analog_rows = build_analog_rows(parameter_data["ref_params"], parameter_data["analog_limits"])
+    rows = []
+    for _, record in df_input.iterrows():
+        for column, value in record.items():
+            if column in id_cols or pd.isna(value):
+                continue
+            if not str(column).startswith("MAP"):
+                continue
+            ret_y = int(float(record["SHOTSY"])) - _map_number(column, prefix_len=3) + 1
+            for ret_x, ret_type in enumerate(str(value), start=1):
+                row = {column_name: record[column_name] for column_name in id_cols if column_name != "Id"}
+                row.update(
+                    {
+                        "ret_y": ret_y,
+                        "ret_x_size": _trim_numeric(record["XFRAME"]),
+                        "ret_y_size": _trim_numeric(record["YFRAME"]),
+                        "ret_x": ret_x,
+                        "ret_type": ret_type,
+                    }
+                )
+                row["ret_y_vs_x_ratio"] = row["ret_y_size"] / row["ret_x_size"]
+                rows.append(row)
+
+    df_ret_xy = pd.DataFrame(rows)
+    if df_ret_xy.empty:
+        return pd.DataFrame()
+
+    merged = df_ret_xy.merge(
+        emap_total,
+        left_on=merge_left,
+        right_on=merge_right,
+        how="right",
+    )
+    merged["center_mm_distance"] = pd.NA
+    merged = merged[merged["ret_x"].notna()].copy()
+    merged["id"] = range(1, len(merged) + 1)
+    return merged
+
+
+def _die_map_lines(map_lines):
+    keys = (
+        {"DESIGN", "YFRAME", "XFRAME", "SHOTSY", "SHOTSX", "CYSIZE", "CXSIZE", "COLALL", "ROWALL"}
+        | DIE_MAP_KEYS
+    )
+    return _map_rows(
+        map_lines,
+        keys,
+        unique=True,
+        filter_shots=True,
+    )
+
+
+def _build_die_line_rows(map_lines):
+    df_input = _die_map_lines(map_lines)
+    rows = []
+    for _, record in df_input.iterrows():
+        for column, value in record.items():
+            if column in {"Id", "COLALL", "CXSIZE", "CYSIZE", "DESIGN", "ROWALL", "SHOTSX", "SHOTSY", "XFRAME", "YFRAME"}:
+                continue
+            if pd.isna(value) or not str(column).startswith("MAP"):
+                continue
+            die_y = int(float(record["ROWALL"])) - _map_number(column, prefix_len=3) + 1
+            row = {
+                "COLALL": record["COLALL"],
+                "CXSIZE": record["CXSIZE"],
+                "CYSIZE": record["CYSIZE"],
+                "DESIGN": record["DESIGN"],
+                "ROWALL": record["ROWALL"],
+                "SHOTSX": record.get("SHOTSX"),
+                "SHOTSY": record.get("SHOTSY"),
+                "XFRAME": record["XFRAME"],
+                "YFRAME": record["YFRAME"],
+                "die_y": die_y,
+                "value": str(value),
+                "die_x_size": _trim_numeric(record["CXSIZE"]),
+                "die_y_size": _trim_numeric(record["CYSIZE"]),
+            }
+            row["die_y_vs_x_ratio"] = row["die_y_size"] / row["die_x_size"]
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def build_die_ret_emap(map_lines, ret_emap):
+    df_die = _build_die_line_rows(map_lines)
+    rows = []
+    for _, record in df_die.iterrows():
+        for die_x, die_type in enumerate(str(record["value"]), start=1):
+            row = record.drop(labels=["value"]).to_dict()
+            row["die_x"] = die_x
+            row["die_type"] = die_type
+            rows.append(row)
+
+    df_die_xy = pd.DataFrame(rows)
+    if df_die_xy.empty:
+        return pd.DataFrame()
+
+    df_die_xy["Modulo_x"] = (df_die_xy["COLALL"].astype(int) // df_die_xy["SHOTSX"].astype(int)).astype(int)
+    df_die_xy["Modulo_y"] = (df_die_xy["ROWALL"].astype(int) // df_die_xy["SHOTSY"].astype(int)).astype(int)
+    df_die_xy["die_x_ret_position"] = ((df_die_xy["die_x"].astype(int) - 1) % df_die_xy["Modulo_x"]) + 1
+    df_die_xy["die_y_ret_position"] = ((df_die_xy["die_y"].astype(int) - 1) % df_die_xy["Modulo_y"]) + 1
+
+    df_die_xy["ret_x"] = ((df_die_xy["die_x"].astype(int) - 1) // df_die_xy["Modulo_x"]) + 1
+    df_die_xy["ret_y"] = ((df_die_xy["die_y"].astype(int) - 1) // df_die_xy["Modulo_y"]) + 1
+
+    merge_left = ["DESIGN", "SHOTSX", "SHOTSY", "die_x_size", "die_y_size", "die_y_vs_x_ratio", "ret_x", "ret_y"]
+    merge_right = ["DESIGN", "SHOTSX", "SHOTSY", "die_x_size", "die_y_size", "die_y_vs_x_ratio", "ret_x", "ret_y"]
+    merged = df_die_xy.merge(ret_emap, left_on=merge_left, right_on=merge_right, how="inner")
+    merged["center_mm_distance"] = pd.NA
+    return merged
+
+
+def classify_partial_reticles(ret_emap, die_ret_emap):
+    ret = ret_emap.copy()
+    dies = die_ret_emap.copy()
+    if ret.empty or dies.empty:
+        ret["test_ret_type"] = pd.NA
+        return ret
+
+    ret["ret_type"] = ret["ret_type"].astype(str).str.strip().str[:2]
+    dies["die_type"] = dies["die_type"].astype(str).str.strip().str[:2]
+
+    ret["Xcenter"] = ((pd.to_numeric(ret["SHOTSX"], errors="coerce") + 1) // 2).astype("Int64")
+    ret["Ycenter"] = ((pd.to_numeric(ret["SHOTSY"], errors="coerce") + 1) // 2).astype("Int64")
+
+    center = ret[(ret["ret_x"].astype(int) == ret["Xcenter"].astype(int)) & (ret["ret_y"].astype(int) == ret["Ycenter"].astype(int))]
+    center_id = center["id"].iloc[0] if not center.empty else pd.NA
+    reference = dies[dies["id"] == center_id].sort_values(["die_x_ret_position", "die_y_ret_position"])
+
+    def edges(frame):
+        if frame.empty:
+            return (), (), (), ()
+        return (
+            tuple(frame[frame["die_x_ret_position"] == frame["die_x_ret_position"].min()]["die_type"]),
+            tuple(frame[frame["die_y_ret_position"] == frame["die_y_ret_position"].min()]["die_type"]),
+            tuple(frame[frame["die_x_ret_position"] == frame["die_x_ret_position"].max()]["die_type"]),
+            tuple(frame[frame["die_y_ret_position"] == frame["die_y_ret_position"].max()]["die_type"]),
+        )
+
+    reference_edges = edges(reference)
+    test_values = []
+    ret_types = []
+    for _, row in ret.iterrows():
+        ret_type = row["ret_type"]
+        test_ret_type = pd.NA
+
+        if ret_type in {".", "L", "E", "M"}:
+            test_ret_type = "."
+        if ret_type == "C":
+            current = dies[dies["id"] == row["id"]].sort_values(["die_x_ret_position", "die_y_ret_position"])
+            test_ret_type = "C" if edges(current) == reference_edges else "P"
+
+        test_values.append(test_ret_type)
+        ret_types.append(ret_type)
+
+    ret["test_ret_type"] = test_values
+    ret["ret_type"] = ret_types
+    return ret
+
+
+def build_device_payload(device_row, maps_rows, map0_info):
+    maskset_name = str(device_row["maskset_name"])
+    if maps_rows.empty:
+        raise ValueError(f"No map0_header row found for {maskset_name}")
+    map_file_column = _first_existing(maps_rows, "MAP0_FILE", "map0_file")
+
+    map_file_content = "\n".join(
+        maps_rows[map_file_column].dropna().astype(str).tolist()
+    )
+    map_lines = parse_map0_file(map_file_content)
+    emap_ascii = build_emap_ascii(map_lines, device_row)
+    emap_total = build_emap_total(emap_ascii, map0_info)
+    ret_emap = build_ret_emap(map_lines, emap_total)
+    die_ret_emap = build_die_ret_emap(map_lines, ret_emap)
+    ret_emap = classify_partial_reticles(ret_emap, die_ret_emap)
 
     return {
-        "ref_master": ref_master_row,
-        "ref_param": ref_param_rows,
-        "ref_yield": yield_rows,
-        "ref_analog": analog_rows,
+        "emap": emap_total.reindex(columns=EMAP_COLUMNS),
+        "ret_emap": ret_emap,
+        "die_ret_emap": die_ret_emap,
     }
+
+
+def build_t_ret(ret_emap, t_emap):
+    merged = t_emap.merge(
+        ret_emap,
+        left_on=["sapn", "maskset_name", "device_id", "version"],
+        right_on=["sapn", "DESIGN", "device_id", "version"],
+        how="inner",
+    )
+    return merged.reindex(columns=RET_COLUMNS)
+
+
+def build_t_die(die_ret_emap, t_emap, t_ret):
+    emap_ret = t_ret.merge(t_emap, on="emap_id", how="left")
+    merged = emap_ret.merge(
+        die_ret_emap,
+        left_on=["sapn", "maskset_name", "device_id", "version", "ret_x", "ret_y"],
+        right_on=["sapn", "DESIGN", "device_id", "version", "ret_x", "ret_y"],
+        how="inner",
+    )
+    return merged.reindex(columns=DIE_COLUMNS)
+
+
+def build_ret_update_rows(existing_rets, t_ret):
+    return existing_rets.merge(
+        t_ret,
+        on=["emap_id", "ret_x", "ret_y", "ret_type", "center_mm_distance"],
+        how="inner",
+    )
+
+
+def should_skip_device(device_row):
+    return pd.isna(device_row.get("maskset_name"))
+
+
+def normalize_device_row(device_row):
+    data = device_row.copy()
+    data["maskset_name"] = normalize_maskset(data["maskset_name"])
+    return data
