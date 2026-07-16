@@ -1,6 +1,5 @@
 import argparse
 import logging
-from collections.abc import Iterable, Sequence
 from datetime import date, timedelta
 
 from sqlalchemy import bindparam, text
@@ -12,7 +11,7 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 DEFAULT_BATCH_SIZE = 1_000
 
 
-def get_limits(days_back: int = 1101) -> tuple[int, int, str]:
+def get_limits(days_back=1101):
     limit_date = date.today() - timedelta(days=days_back)
     limit_day = int(limit_date.strftime("%Y%m%d"))
     limit_part = int(limit_date.strftime("%Y%m"))
@@ -25,18 +24,18 @@ def get_limits(days_back: int = 1101) -> tuple[int, int, str]:
     return limit_day, limit_part, f"p{part_number}"
 
 
-def chunks(values: Sequence[int], size: int) -> Iterable[list[int]]:
+def chunks(values, size):
     for index in range(0, len(values), size):
         yield list(values[index : index + size])
 
 
-def validate_partition(partition: str) -> str:
+def validate_partition(partition):
     if not partition.startswith("p") or not partition[1:].isdigit():
         raise ValueError(f"Invalid partition name: {partition}")
     return partition
 
 
-def fetch_event_ids(connection, queries: Sequence[str], params: dict | None = None) -> list[int]:
+def fetch_event_ids(connection, queries, params=None):
     event_ids: set[int] = set()
     for query in queries:
         rows = connection.execute(text(query), params or {})
@@ -49,11 +48,11 @@ def fetch_event_ids(connection, queries: Sequence[str], params: dict | None = No
 
 def delete_by_event_ids(
     connection,
-    table_names: Sequence[str],
-    event_ids: Sequence[int],
-    batch_size: int,
-    dry_run: bool,
-) -> dict[str, int]:
+    table_names,
+    event_ids,
+    batch_size,
+    dry_run,
+):
     deleted_rows = {table_name: 0 for table_name in table_names}
     if not event_ids:
         return deleted_rows
@@ -76,14 +75,14 @@ def delete_by_event_ids(
 
 def clean_section(
     connection,
-    label: str,
-    queries: Sequence[str],
-    delete_tables: Sequence[str],
-    params: dict | None = None,
-    limit: int | None = None,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    dry_run: bool = False,
-) -> None:
+    label,
+    queries,
+    delete_tables,
+    params=None,
+    limit=None,
+    batch_size=DEFAULT_BATCH_SIZE,
+    dry_run=False,
+):
     event_ids = fetch_event_ids(connection, queries, params)
     if limit is not None:
         event_ids = event_ids[:limit]
@@ -103,7 +102,7 @@ def clean_section(
         logging.info("%s: %s row(s) deleted from %s", label, row_count, table_name)
 
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(description="Clean old DMP events.")
     parser.add_argument("--days-back", type=int, default=1101)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
