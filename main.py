@@ -10,7 +10,6 @@ from config import (
 )
 from extract import (
     extract_lot_measurements,
-    extract_nparams,
     extract_swt_profiles,
     extract_wafer_measurements,
 )
@@ -24,7 +23,6 @@ from load import (
 from transform import (
     ACTIVE_TECHNOS,
     build_allgood_wafer,
-    build_nparam_list,
     combine_measurements,
     format_identifier,
     get_archive_directory,
@@ -57,9 +55,11 @@ def get_swt_date_window():
 
 
 def get_swt_root_directory():
+    # Production output:
+    # /home/auemura@xfab.ads/share/EDASHARE/EDA_PUBLIC/CARAC
     return os.environ.get(
         "SWT_ROOT_DIRECTORY",
-        "/home/auemura@xfab.ads/share/EDASHARE/EDA_PUBLIC/CARAC",
+        BASE_DIR,
     )
 
 
@@ -77,22 +77,15 @@ def process_profile(profile, dbprod_engine, root_directory, start_date, end_date
     archive_directory = get_archive_directory(techno, root_directory)
     pmax = get_pmax(techno)
 
-    nparam_source = extract_nparams(dbprod_engine, npnpid, version) if techno == "T18SO" else None
-    nparams = build_nparam_list(techno, nparam_source)
-    if not nparams:
-        logger.info("Skip %s/%s/%s: empty NPARAM list", techno, npnpid, version)
-        return None
-
     logger.info(
-        "Start SWT profile techno=%s, npnpid=%s, version=%s, nparam=%s",
+        "Start SWT profile techno=%s, npnpid=%s, version=%s",
         techno,
         npnpid,
         version,
-        len(nparams),
     )
 
     lot_parametric, lot_yield = extract_lot_measurements(
-        dbprod_engine, npnpid, version, nparams, start_date, end_date
+        dbprod_engine, npnpid, version, start_date, end_date
     )
     lot_fresh = transform_swt_measurements(
         combine_measurements(lot_parametric, lot_yield),
@@ -108,7 +101,7 @@ def process_profile(profile, dbprod_engine, root_directory, start_date, end_date
         logger.info("Skip lot CSV for npnpid=%s: no fresh or archived row", npnpid)
 
     wafer_parametric, wafer_yield = extract_wafer_measurements(
-        dbprod_engine, npnpid, version, nparams, start_date, end_date
+        dbprod_engine, npnpid, version, start_date, end_date
     )
     wafer_fresh = transform_swt_measurements(
         combine_measurements(wafer_parametric, wafer_yield),

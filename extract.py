@@ -1,20 +1,16 @@
 import logging
 
 import pandas as pd
-from sqlalchemy import bindparam, text
+from sqlalchemy import text
 
 
 logger = logging.getLogger(__name__)
 
 
-def _read_sql(engine, query, params=None, label="query", expanding_params=None):
+def _read_sql(engine, query, params=None, label="query"):
     logger.info("Extract %s", label)
-    statement = text(query)
-    for param in expanding_params or ():
-        statement = statement.bindparams(bindparam(param, expanding=True))
-
     with engine.connect() as connection:
-        return pd.read_sql(statement, connection, params=params or {})
+        return pd.read_sql(text(query), connection, params=params or {})
 
 
 def extract_swt_profiles(dmp_engine):
@@ -27,21 +23,6 @@ def extract_swt_profiles(dmp_engine):
     return _read_sql(dmp_engine, query, label="SWT profiles from DMP")
 
 
-def extract_nparams(dbprod_engine, npnpid, version):
-    query = """
-        SELECT nparam
-        FROM DBPROD.T_TPARAMF
-        WHERE npnpid = :npnpid
-          AND version = :version
-    """
-    return _read_sql(
-        dbprod_engine,
-        query,
-        params={"npnpid": str(npnpid), "version": str(version)},
-        label=f"NPARAM list for npnpid={npnpid}, version={version}",
-    )
-
-
 def _extract_swt_measurements(
     dbprod_engine,
     *,
@@ -49,7 +30,6 @@ def _extract_swt_measurements(
     value_column,
     npnpid,
     version,
-    nparams,
     start_date,
     end_date,
     label,
@@ -72,7 +52,6 @@ def _extract_swt_measurements(
            AND a.nparam = t.nparam
         WHERE a.npnpid = :npnpid
           AND a.version = :version
-          AND a.nparam IN :nparams
           AND a.nlocfab IN (
               SELECT nlocfab
               FROM DBPROD.T_TLOTPNPF
@@ -88,23 +67,20 @@ def _extract_swt_measurements(
         params={
             "npnpid": str(npnpid),
             "version": str(version),
-            "nparams": [str(value).strip() for value in nparams],
             "start_date": start_date,
             "end_date": end_date,
         },
         label=label,
-        expanding_params=("nparams",),
     )
 
 
-def extract_lot_measurements(dbprod_engine, npnpid, version, nparams, start_date, end_date):
+def extract_lot_measurements(dbprod_engine, npnpid, version, start_date, end_date):
     parametric = _extract_swt_measurements(
         dbprod_engine,
         data_table="T_TLOTPARF",
         value_column="qvl50pc",
         npnpid=npnpid,
         version=version,
-        nparams=nparams,
         start_date=start_date,
         end_date=end_date,
         label=f"lot parametric data npnpid={npnpid}",
@@ -116,7 +92,6 @@ def extract_lot_measurements(dbprod_engine, npnpid, version, nparams, start_date
         value_column="qyield",
         npnpid=npnpid,
         version=version,
-        nparams=nparams,
         start_date=start_date,
         end_date=end_date,
         label=f"lot yield data npnpid={npnpid}",
@@ -125,14 +100,13 @@ def extract_lot_measurements(dbprod_engine, npnpid, version, nparams, start_date
     return parametric, yield_data
 
 
-def extract_wafer_measurements(dbprod_engine, npnpid, version, nparams, start_date, end_date):
+def extract_wafer_measurements(dbprod_engine, npnpid, version, start_date, end_date):
     parametric = _extract_swt_measurements(
         dbprod_engine,
         data_table="T_TTRCPARF",
         value_column="qvl50pc",
         npnpid=npnpid,
         version=version,
-        nparams=nparams,
         start_date=start_date,
         end_date=end_date,
         label=f"wafer parametric data npnpid={npnpid}",
@@ -144,7 +118,6 @@ def extract_wafer_measurements(dbprod_engine, npnpid, version, nparams, start_da
         value_column="qyield",
         npnpid=npnpid,
         version=version,
-        nparams=nparams,
         start_date=start_date,
         end_date=end_date,
         label=f"wafer yield data npnpid={npnpid}",
