@@ -1,130 +1,153 @@
 import logging
 
 import pandas as pd
-from sqlalchemy import text
-
-from config import DBMAPS_MAP_TYPE, SEND_TO_DB_UPDATE
+from sqlalchemy import bindparam, text
 
 
 logger = logging.getLogger(__name__)
 
 
-def _read_sql(engine, query, params=None, label="query"):
+def _read_sql(engine, query, params=None, label="query", expanding_params=None):
     logger.info("Extract %s", label)
+    statement = text(query)
+    for param in expanding_params or ():
+        statement = statement.bindparams(bindparam(param, expanding=True))
+
     with engine.connect() as connection:
-        return pd.read_sql(text(query), connection, params=params or {})
+        return pd.read_sql(statement, connection, params=params or {})
 
 
-def extract_devices_without_emap(dmp_engine):
+def extract_swt_profiles(dmp_engine):
     query = """
-        SELECT A.*, B.emap_id
-        FROM t_device A
-        LEFT JOIN t_emap B ON A.device_id = B.device_id
-        WHERE emap_id IS NULL
-          AND A.maskset_name != 'KIT'
-          AND A.maskset_name != 'PREPRO'
-          AND A.maskset_name != ''
+        SELECT profile_name,
+               selected_npnpid,
+               selected_version
+        FROM t_profile_maps_master
     """
-    return _read_sql(dmp_engine, query, label="devices without emap")
+    return _read_sql(dmp_engine, query, label="SWT profiles from DMP")
 
 
-def extract_devices_for_update(dmp_engine, emap_id=2299):
+def extract_nparams(dbprod_engine, npnpid, version):
     query = """
-        SELECT A.*, B.emap_id
-        FROM t_device A
-        LEFT JOIN t_emap B ON A.device_id = B.device_id
-        WHERE B.emap_id = :emap_id
+        SELECT nparam
+        FROM DBPROD.T_TPARAMF
+        WHERE npnpid = :npnpid
+          AND version = :version
     """
     return _read_sql(
-        dmp_engine,
+        dbprod_engine,
         query,
-        params={"emap_id": int(emap_id)},
-        label=f"devices for emap update {emap_id}",
+        params={"npnpid": str(npnpid), "version": str(version)},
+        label=f"NPARAM list for npnpid={npnpid}, version={version}",
     )
 
 
-def extract_devices(dmp_engine, send_to_db):
-    if send_to_db == SEND_TO_DB_UPDATE:
-        return extract_devices_for_update(dmp_engine)
-    return extract_devices_without_emap(dmp_engine)
-
-
-def latest_map0_header_query(select_clause):
-    return f"""
-        SELECT DISTINCT {select_clause}
-        FROM dbmaps.map0_header t1
-        LEFT JOIN dbmaps.map0_header t2
-          ON t1.DESIGN = t2.DESIGN
-         AND t1.MAP_TYPE = t2.MAP_TYPE
-         AND t1.DT_EFFET < t2.DT_EFFET
-        WHERE (
-                (t2.DT_EFFET IS NULL AND t2.VERSION IS NULL AND t1.COMMENT NOT LIKE '%FROM STIF%')
-                OR (t2.COMMENT LIKE '%FROM STIF%' AND t1.COMMENT NOT LIKE '%FROM STIF%')
-            )
-          AND t1.CHIP_COUNT != 1
-          AND t1.MAP_TYPE = :map_type
-          AND t1.DT_EFFET IS NOT NULL
-          AND t1.DESIGN = :design
+def _extract_swt_measurements(
+    dbprod_engine,
+    *,
+    data_table,
+    value_column,
+    npnpid,
+    version,
+    nparams,
+    start_date,
+    end_date,
+    label,
+    include_wafer,
+):
+    wafer_column = "a.ntranch," if include_wafer else ""
+    query = f"""
+        SELECT a.nlocfab,
+               {wafer_column}
+               a.ddtest,
+               a.npnpid,
+               a.version,
+               a.nparam,
+               a.{value_column} AS value,
+               SUBSTR(t.tparam, 1, 35) AS tparam
+        FROM DBPROD.{data_table} AS a
+        INNER JOIN DBPROD.T_TPARAMF AS t
+            ON a.npnpid = t.npnpid
+           AND a.version = t.version
+           AND a.nparam = t.nparam
+        WHERE a.npnpid = :npnpid
+          AND a.version = :version
+          AND a.nparam IN :nparams
+          AND a.nlocfab IN (
+              SELECT nlocfab
+              FROM DBPROD.T_TLOTPNPF
+              WHERE npnpid = :npnpid
+                AND version = :version
+                AND ddtest >= :start_date
+                AND ddtest <= :end_date
+          )
     """
-
-
-def extract_map0_rows(dbmaps_engine, maskset_name):
-    query = latest_map0_header_query("t1.*")
     return _read_sql(
-        dbmaps_engine,
+        dbprod_engine,
         query,
-        params={"map_type": DBMAPS_MAP_TYPE, "design": maskset_name},
-        label=f"dbmaps.map0_header file {maskset_name}/{DBMAPS_MAP_TYPE}",
+        params={
+            "npnpid": str(npnpid),
+            "version": str(version),
+            "nparams": [str(value).strip() for value in nparams],
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        label=label,
+        expanding_params=("nparams",),
     )
 
 
-def extract_map0_info(dbmaps_engine, maskset_name):
-    select_clause = """
-        t1.SAPN,
-        t1.DESIGN,
-        t1.VERSION,
-        t1.MAP_TYPE,
-        t1.CHIP_COUNT,
-        t1.COLCNT,
-        t1.ROWCNT,
-        t1.XDIES,
-        t1.YDIES,
-        t1.COMMENT,
-        t1.MAJ_DATE,
-        t1.DT_EFFET
-    """
-    query = latest_map0_header_query(select_clause)
-    return _read_sql(
-        dbmaps_engine,
-        query,
-        params={"map_type": DBMAPS_MAP_TYPE, "design": maskset_name},
-        label=f"dbmaps.map0_header info {maskset_name}/{DBMAPS_MAP_TYPE}",
+def extract_lot_measurements(dbprod_engine, npnpid, version, nparams, start_date, end_date):
+    parametric = _extract_swt_measurements(
+        dbprod_engine,
+        data_table="T_TLOTPARF",
+        value_column="qvl50pc",
+        npnpid=npnpid,
+        version=version,
+        nparams=nparams,
+        start_date=start_date,
+        end_date=end_date,
+        label=f"lot parametric data npnpid={npnpid}",
+        include_wafer=False,
     )
-
-
-def extract_t_emap(dmp_engine):
-    return _read_sql(dmp_engine, "SELECT * FROM t_emap", label="t_emap")
-
-
-def extract_t_ret(dmp_engine):
-    return _read_sql(dmp_engine, "SELECT * FROM t_ret", label="t_ret")
-
-
-def extract_existing_rets_for_maskset(dmp_engine, maskset_name):
-    query = """
-        SELECT a.ret_id,
-               a.emap_id,
-               a.ret_x,
-               a.ret_y,
-               a.ret_type,
-               a.center_mm_distance
-        FROM t_ret a
-        JOIN t_emap b ON a.emap_id = b.emap_id
-        WHERE b.maskset_name = :maskset_name
-    """
-    return _read_sql(
-        dmp_engine,
-        query,
-        params={"maskset_name": maskset_name},
-        label=f"existing rets for {maskset_name}",
+    yield_data = _extract_swt_measurements(
+        dbprod_engine,
+        data_table="T_TLOTYLDF",
+        value_column="qyield",
+        npnpid=npnpid,
+        version=version,
+        nparams=nparams,
+        start_date=start_date,
+        end_date=end_date,
+        label=f"lot yield data npnpid={npnpid}",
+        include_wafer=False,
     )
+    return parametric, yield_data
+
+
+def extract_wafer_measurements(dbprod_engine, npnpid, version, nparams, start_date, end_date):
+    parametric = _extract_swt_measurements(
+        dbprod_engine,
+        data_table="T_TTRCPARF",
+        value_column="qvl50pc",
+        npnpid=npnpid,
+        version=version,
+        nparams=nparams,
+        start_date=start_date,
+        end_date=end_date,
+        label=f"wafer parametric data npnpid={npnpid}",
+        include_wafer=True,
+    )
+    yield_data = _extract_swt_measurements(
+        dbprod_engine,
+        data_table="T_TTRCYLDF",
+        value_column="qyield",
+        npnpid=npnpid,
+        version=version,
+        nparams=nparams,
+        start_date=start_date,
+        end_date=end_date,
+        label=f"wafer yield data npnpid={npnpid}",
+        include_wafer=True,
+    )
+    return parametric, yield_data

@@ -1,34 +1,38 @@
 import logging
+import os
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 from config import (
-    SEND_TO_DB_INSERT,
-    SEND_TO_DB_UPDATE,
-    connect_to_dbmaps,
-    connect_to_dmp,
-    get_device_limit,
-    get_send_to_db,
+    connect_to_datamart_db,
+    connect_to_dbprod_db,
 )
 from extract import (
-    extract_devices,
-    extract_existing_rets_for_maskset,
-    extract_map0_info,
-    extract_map0_rows,
-    extract_t_emap,
-    extract_t_ret,
+    extract_lot_measurements,
+    extract_nparams,
+    extract_swt_profiles,
+    extract_wafer_measurements,
 )
-from load import load_die, load_emap, load_ret, update_emap, update_ret_test_types
+from load import (
+    allgood_wafer_path,
+    lot_archive_path,
+    read_archive_csv,
+    wafer_archive_path,
+    write_archive_csv,
+)
 from transform import (
-    build_device_payload,
-    build_ret_update_rows,
-    build_t_die,
-    build_t_ret,
-    normalize_device_row,
-    prepare_devices,
-    should_skip_device,
+    ACTIVE_TECHNOS,
+    build_allgood_wafer,
+    build_nparam_list,
+    combine_measurements,
+    format_identifier,
+    get_archive_directory,
+    get_pmax,
+    merge_archive,
+    prepare_profiles,
+    transform_swt_measurements,
 )
-
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
@@ -38,87 +42,130 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler(LOG_DIR / "DBMAPS_TO_DATAMART.log", mode="w", encoding="utf-8"),
+        logging.FileHandler(LOG_DIR / "SWT_TO_EDA_CSV.log", mode="w", encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
 logger = logging.getLogger(__name__)
 
 
-def process_device(device_row, dmp_engine, dbmaps_engine, send_to_db):
-    if should_skip_device(device_row):
-        logger.info("Skip device with empty maskset_name")
+def get_swt_date_window():
+    days = int(os.environ.get("SWT_LOOKBACK_DAYS", "30"))
+    end_date = date.today()
+    start_date = end_date - timedelta(days=days)
+    return start_date.isoformat(), end_date.isoformat()
+
+
+def get_swt_root_directory():
+    return os.environ.get(
+        "SWT_ROOT_DIRECTORY",
+        "/home/auemura@xfab.ads/share/EDASHARE/EDA_PUBLIC/CARAC",
+    )
+
+
+def get_swt_active_technos(default_technos):
+    raw = os.environ.get("SWT_ACTIVE_TECHNOS")
+    if not raw:
+        return default_technos
+    return tuple(value.strip() for value in raw.split(",") if value.strip())
+
+
+def process_profile(profile, dbprod_engine, root_directory, start_date, end_date):
+    techno = str(profile["techno"])
+    npnpid = format_identifier(profile["npnpid"])
+    version = format_identifier(profile["version"])
+    archive_directory = get_archive_directory(techno, root_directory)
+    pmax = get_pmax(techno)
+
+    nparam_source = extract_nparams(dbprod_engine, npnpid, version) if techno == "T18SO" else None
+    nparams = build_nparam_list(techno, nparam_source)
+    if not nparams:
+        logger.info("Skip %s/%s/%s: empty NPARAM list", techno, npnpid, version)
         return None
 
-    device_row = normalize_device_row(device_row)
-    maskset_name = str(device_row["maskset_name"])
-    logger.info("Map Creation for %s", maskset_name)
+    logger.info(
+        "Start SWT profile techno=%s, npnpid=%s, version=%s, nparam=%s",
+        techno,
+        npnpid,
+        version,
+        len(nparams),
+    )
 
-    maps_rows = extract_map0_rows(dbmaps_engine, maskset_name)
-    map0_info = extract_map0_info(dbmaps_engine, maskset_name)
-    payload = build_device_payload(device_row, maps_rows, map0_info)
-
-    if payload["emap"].empty:
-        raise ValueError(f"ERROR FOUND ON DBMAPS: no emap created for {maskset_name}")
-
-    if send_to_db == SEND_TO_DB_INSERT:
-        load_emap(payload["emap"], dmp_engine)
-    elif send_to_db == SEND_TO_DB_UPDATE:
-        update_emap(payload["emap"], dmp_engine, device_row["emap_id"])
+    lot_parametric, lot_yield = extract_lot_measurements(
+        dbprod_engine, npnpid, version, nparams, start_date, end_date
+    )
+    lot_fresh = transform_swt_measurements(
+        combine_measurements(lot_parametric, lot_yield),
+        pmax=pmax,
+        id_columns=["NLOCFAB", "DDTEST", "NPNPID", "VERSION"],
+    )
+    lot_path = lot_archive_path(archive_directory, npnpid)
+    existing_lot_archive = read_archive_csv(lot_path)
+    lot_archive = merge_archive(existing_lot_archive, lot_fresh, ["NLOCFAB"])
+    if not lot_archive.empty:
+        write_archive_csv(lot_archive, lot_path)
     else:
-        logger.info("DB load disabled by DBMAPS_SEND_TO_DB=%s", send_to_db)
+        logger.info("Skip lot CSV for npnpid=%s: no fresh or archived row", npnpid)
 
-    t_emap = extract_t_emap(dmp_engine)
-    t_ret_payload = build_t_ret(payload["ret_emap"], t_emap)
+    wafer_parametric, wafer_yield = extract_wafer_measurements(
+        dbprod_engine, npnpid, version, nparams, start_date, end_date
+    )
+    wafer_fresh = transform_swt_measurements(
+        combine_measurements(wafer_parametric, wafer_yield),
+        pmax=pmax,
+        id_columns=["NLOCFAB", "NTRANCH", "DDTEST", "NPNPID", "VERSION"],
+    )
+    wafer_path = wafer_archive_path(archive_directory, npnpid)
+    existing_wafer_archive = read_archive_csv(wafer_path)
+    wafer_archive = merge_archive(existing_wafer_archive, wafer_fresh, ["NLOCFAB", "NTRANCH"])
+    if not wafer_archive.empty:
+        write_archive_csv(wafer_archive, wafer_path)
+    else:
+        logger.info("Skip wafer CSV for npnpid=%s: no fresh or archived row", npnpid)
 
-    if send_to_db == SEND_TO_DB_UPDATE:
-        existing_rets = extract_existing_rets_for_maskset(dmp_engine, maskset_name)
-        ret_update_rows = build_ret_update_rows(existing_rets, t_ret_payload)
-        update_ret_test_types(ret_update_rows, dmp_engine)
-    elif send_to_db == SEND_TO_DB_INSERT:
-        load_ret(t_ret_payload, dmp_engine)
-
-    t_ret = extract_t_ret(dmp_engine)
-    t_die_payload = build_t_die(payload["die_ret_emap"], t_emap, t_ret)
-
-    if t_die_payload.empty:
-        raise ValueError(
-            f"ERROR FOUND ON ETL dbmaps_to_datamart: die creation fail for {maskset_name}"
-        )
-
-    if send_to_db == SEND_TO_DB_INSERT:
-        load_die(t_die_payload, dmp_engine)
+    allgood_rows = 0
+    if techno == "T18SO" and not wafer_archive.empty:
+        allgood = build_allgood_wafer(wafer_archive)
+        write_archive_csv(allgood, allgood_wafer_path(archive_directory, npnpid))
+        allgood_rows = len(allgood)
 
     return {
-        "maskset_name": maskset_name,
-        "emap_rows": len(payload["emap"]),
-        "ret_rows": len(t_ret_payload),
-        "die_rows": len(t_die_payload),
+        "techno": techno,
+        "npnpid": npnpid,
+        "version": version,
+        "lot_rows": len(lot_archive),
+        "wafer_rows": len(wafer_archive),
+        "allgood_rows": allgood_rows,
     }
 
 
 def run_etl():
-    start_time = time.perf_counter()
-    send_to_db = get_send_to_db()
-    device_limit = get_device_limit()
+    started = time.perf_counter()
+    start_date, end_date = get_swt_date_window()
+    root_directory = get_swt_root_directory()
+    active_technos = get_swt_active_technos(ACTIVE_TECHNOS)
     results = []
 
-    dmp_engine = connect_to_dmp()
-    dbmaps_engine = connect_to_dbmaps()
-    try:
-        devices = prepare_devices(extract_devices(dmp_engine, send_to_db), device_limit)
-        logger.info("%s device(s) selected", len(devices))
+    logger.info("START SWT ETL")
+    logger.info("Date window: %s to %s", start_date, end_date)
+    logger.info("Archive root: %s", root_directory)
 
-        for _, device_row in devices.iterrows():
-            result = process_device(device_row, dmp_engine, dbmaps_engine, send_to_db)
+    dmp_engine = connect_to_datamart_db()
+    dbprod_engine = connect_to_dbprod_db()
+    try:
+        profiles = prepare_profiles(extract_swt_profiles(dmp_engine), active_technos)
+        logger.info("%s SWT profile(s) selected", len(profiles))
+
+        for _, profile in profiles.iterrows():
+            result = process_profile(profile, dbprod_engine, root_directory, start_date, end_date)
             if result:
                 results.append(result)
 
-        logger.info("End ETL in %.2f sec", time.perf_counter() - start_time)
+        logger.info("END SWT ETL in %.2f sec", time.perf_counter() - started)
         return results
     finally:
         dmp_engine.dispose()
-        dbmaps_engine.dispose()
+        dbprod_engine.dispose()
 
 
 if __name__ == "__main__":
